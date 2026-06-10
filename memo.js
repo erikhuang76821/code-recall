@@ -1455,8 +1455,8 @@ function gitHooksDir() {
 /** Forward-slash an absolute path (sh-friendly, valid for node on Windows too). */
 function fwd(p) { return String(p).replace(/\\/g, '/'); }
 
-/** The managed sh block embedded in .git/hooks/pre-commit. */
-function gitHookBlock() {
+/** The managed sh block embedded in .git/hooks/pre-commit. strict → blocking. */
+function gitHookBlock(strict) {
   const node = fwd(process.execPath);
   const memo = fwd(path.join(__dirname, 'memo.js'));
   // Shell-safety guard mirrors the installers: a path with " ` $ or a newline
@@ -1470,7 +1470,7 @@ function gitHookBlock() {
     '  _memo_node="' + node + '"',
     '  [ -x "$_memo_node" ] || _memo_node="$(command -v node 2>/dev/null)"',
     '  if [ -n "$_memo_node" ]; then',
-    '    "$_memo_node" "' + memo + '" precommit || exit 1',
+    '    "$_memo_node" "' + memo + '" precommit' + (strict ? ' --strict' : '') + ' || exit 1',
     '    # Stage the refreshed digest for files git already tracks (so the',
     '    # committed AGENTS.md/CLAUDE.md match TASK.md). Untracked files are',
     '    # left alone. if/then/fi (not &&) keeps exit status 0 on a non-match,',
@@ -1500,23 +1500,27 @@ function cmdPrecommit(strict) {
   if (overBudget.length) console.log('  note: over ~' + LEDGER_WARN_BYTES + 'B (run: node memo.js consolidate): ' + overBudget.join(', '));
   if (issues.length === 0) {
     console.log('  lint: clean.');
-  } else {
-    console.log('  lint issues:');
-    for (const m of issues) console.log('    - ' + m);
-    if (strict) {
-      console.log('  (--strict) commit blocked. Fix the entries, or bypass once with: git commit --no-verify');
-      process.exit(1);
-    }
+    return;
   }
+  // Prominent banner (no ANSI: a git hook's stdout is not reliably a TTY, and
+  // colour codes would garble on Windows cmd / non-interactive shells).
+  const bar = '  !! ' + '-'.repeat(60);
+  console.log(bar);
+  console.log('  !! memo-star lint: ' + issues.length + ' issue(s) in the ledger' +
+    (strict ? ' — (--strict) BLOCKING this commit' : ' — commit ALLOWED (advisory)'));
+  for (const m of issues) console.log('  !!   - ' + m);
+  console.log('  !! Fix the entries' + (strict ? ', or bypass once: git commit --no-verify' : ' (run: node memo.js doctor)') + '.');
+  console.log(bar);
+  if (strict) process.exit(1);
 }
 
-function cmdInstallGitHook() {
+function cmdInstallGitHook(strict) {
   requireLedger();
   const hooksDir = gitHooksDir();
   if (hooksDir === null) fail('not a git repository (or git not found). Run inside a repo, or `git init` first.');
   ensureDir(hooksDir);
   const file = path.join(hooksDir, 'pre-commit');
-  const block = gitHookBlock();
+  const block = gitHookBlock(strict);
   const existing = readFileSafe(file);
   let out;
   let verb;
@@ -1538,10 +1542,10 @@ function cmdInstallGitHook() {
   }
   writeFileAtomic(file, out);
   try { fs.chmodSync(file, 0o755); } catch (e) { /* Windows / no-op */ }
-  console.log('memo-star git pre-commit hook ' + verb + ':');
+  console.log('memo-star git pre-commit hook ' + verb + ' [' + (strict ? 'strict: lint errors block the commit' : 'advisory: lint errors warn only') + ']:');
   console.log('  ' + file);
-  console.log('It runs `memo precommit` (refresh digest + lint) and re-stages AGENTS.md/CLAUDE.md when they are part of the commit.');
-  console.log('Make it blocking on malformed entries by editing the block to add --strict. Remove with: node memo.js remove-githook');
+  console.log('It runs `memo precommit' + (strict ? ' --strict' : '') + '` (refresh digest + lint) and re-stages AGENTS.md/CLAUDE.md when they are part of the commit.');
+  console.log((strict ? 'Re-run without --strict for advisory mode. ' : 'Re-run with --strict to make malformed entries block commits. ') + 'Remove with: node memo.js remove-githook');
 }
 
 /** Strip our managed block from .git/hooks/pre-commit. Returns a status word. */
@@ -1583,7 +1587,7 @@ function cmdRemoveGitHook() {
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
-  const usage = 'usage: node memo.js <init|sync [--all]|status|doctor|digest|snapshot|consolidate|search <query> [--limit N]|deinit [--yes]|precommit [--strict]|install-githook|remove-githook>';
+  const usage = 'usage: node memo.js <init|sync [--all]|status|doctor|digest|snapshot|consolidate|search <query> [--limit N]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook>';
   switch (cmd) {
     case 'init': return cmdInit();
     case 'sync': return cmdSync(args.includes('--all'));
@@ -1593,7 +1597,7 @@ function main() {
     case 'snapshot': return cmdSnapshot();
     case 'consolidate': return cmdConsolidate();
     case 'precommit': return cmdPrecommit(args.includes('--strict'));
-    case 'install-githook': return cmdInstallGitHook();
+    case 'install-githook': return cmdInstallGitHook(args.includes('--strict'));
     case 'remove-githook': return cmdRemoveGitHook();
     case 'search': {
       let limit = SEARCH_LIMIT_DEFAULT;
