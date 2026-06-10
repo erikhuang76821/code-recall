@@ -1,5 +1,10 @@
 # Changelog
 
+## v2.7 (2026-06-10)
+
+1. **Honest benchmark (`bench/`, `npm run bench`).** A **deterministic context-hygiene benchmark** measures — by running the real CLI on a synthetic 20-decision log (12 stale) — what reaches the model's context under *naive append-only* vs *Code Recall*: decision tokens injected (~673 → ~66, 10× less), stale content in the injection (60% → 0%), stale hits in a term search (14 → 0). It explicitly does **not** fake agent task-success numbers; `bench/README.md` documents a reproducible **live-agent A/B protocol** (re-litigated decisions / repeated dead-ends / context-loss restarts / completion / tokens) for that, transcripts-required.
+2. **`graduate` → conventional ADR files.** Graduated decisions now become `docs/adr/NNNN-<slug>.md` (sequentially numbered, standard ADR format) — consumable by ADR tooling (adr-tools/log4brains); lessons roll into `docs/adr/lessons.md`. This is the north-star **BRIDGE** (let governance tools consume our decisions). Fixed a latent bug: `graduate` filtered `status === 'active'` and so skipped ADR-grade `accepted` entries — now graduates accepted/active.
+
 ## v2.6 (2026-06-10)
 
 **Surfacing + anti-re-litigation** — keep effective decisions *influential*, not just stored.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.6.0.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.7.0.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -50,7 +50,7 @@ const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the d
 const DIGEST_DECISIONS_TOPN = 5;       // current decisions surfaced in the digest (newest)
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.6.0';
+const VERSION = '2.7.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -58,7 +58,7 @@ const HOME = os.homedir();
 // the HOME env var, so an explicit override is the portable way to redirect it.
 const GLOBAL_DIR = process.env.CODE_RECALL_GLOBAL_DIR || path.join(HOME, '.coderecall');
 const GLOBAL_LESSONS_FILE = path.join(GLOBAL_DIR, 'GLOBAL-LESSONS.md');
-const AI_WIKI_DIR = path.join(CWD, 'docs', 'ai_wiki');   // llm-wiki integration target
+const ADR_DIR = path.join(CWD, 'docs', 'adr');   // graduated decisions → conventional ADR files (BRIDGE: consumable by ADR tooling)
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -2055,6 +2055,16 @@ function cmdSelftest() {
     run(['decision', 'Maybe evaluate GraphQL', '--decision', 'spike only', '--status', 'proposed']);
     const dig3 = run(['digest']);
     check('digest excludes proposed decisions from surfacing', !/Maybe evaluate GraphQL/.test(dig3));
+    // graduate → conventional ADR files (and the accepted-status filter fix).
+    // Clock-relative old date so the >90d gate holds regardless of CI's date.
+    const oldDate = new Date(Date.now() - 200 * 86400000).toISOString().slice(0, 10);
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'),
+      '# DECISIONS\n\n## Graduate me to an ADR file\n- date: ' + oldDate + '\n- status: accepted\n- confidence: high\n**Decision:** do the durable thing\n', 'utf8');
+    run(['graduate']);
+    let adrFiles = [];
+    try { adrFiles = fs.readdirSync(path.join(tmp, 'docs', 'adr')).filter((n) => /^\d{4}-.*\.md$/.test(n)); } catch (e) { /* none */ }
+    const adr = adrFiles.length ? fs.readFileSync(path.join(tmp, 'docs', 'adr', adrFiles[0]), 'utf8') : '';
+    check('graduate writes a numbered ADR file (accepted entries included)', adrFiles.length > 0 && /^# \d{4}\. Graduate me to an ADR file/m.test(adr) && /- Status: accepted/.test(adr));
     fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore
   } catch (e) {
     check('selftest ran without throwing', false);
@@ -2142,41 +2152,90 @@ function cmdGraduate(toGlobal) {
   return withLock(() => {
     const cutoff = Date.now() - GRADUATE_AGE_DAYS * 24 * 3600000;
     const report = [];
-    for (const [label, p, kind] of [['DECISIONS.md', DECISIONS_FILE, 'decisions'], ['LESSONS.md', LESSONS_FILE, 'lessons']]) {
-      const text = readFileSafe(p);
-      if (text === null) continue;
-      const parsed = parseEntries(text);
-      const graduating = parsed.entries.filter((e) =>
-        entryStatus(e) === 'active' &&
+    // Eligible = LIVE (accepted/active — not superseded/deprecated/expired/proposed),
+    // not already graduated, confidence high, older than the age gate.
+    const eligible = (e) => {
+      const st = entryStatus(e);
+      return (st === 'accepted' || st === 'active') &&
+        !entryExpired(e) &&
         entryField(e, 'graduated') === null &&
         entryField(e, 'confidence') === 'high' &&
-        entryDate(e) && Date.parse(entryDate(e)) < cutoff);
-      if (graduating.length === 0) { report.push(label + ': nothing eligible (>' + GRADUATE_AGE_DAYS + 'd, confidence high)'); continue; }
-      ensureDir(AI_WIKI_DIR);
-      const wikiFile = path.join(AI_WIKI_DIR, kind + '.md');
-      const prevWiki = readFileSafe(wikiFile) || '# ' + label.replace('.md', '') + ' (graduated knowledge)\n';
-      const block = graduating.map((e) => e.lines.join('\n').replace(/\n+$/, '')).join('\n\n');
-      writeFileAtomic(wikiFile, prevWiki.replace(/\n+$/, '\n') + '\n' + block + '\n');
-      let globalN = 0;
-      if (toGlobal && kind === 'lessons') {
-        ensureDir(GLOBAL_DIR);
-        const prevG = readFileSafe(GLOBAL_LESSONS_FILE) || '# Global lessons (cross-project, machine/tool scope)\n';
-        const existingTitles = parseEntries(prevG).entries.map((e) => e.title.toLowerCase());
-        const fresh = graduating.filter((e) => existingTitles.indexOf(e.title.toLowerCase()) === -1);
-        if (fresh.length) {
-          const gblock = fresh.map((e) => e.lines.join('\n').replace(/\n+$/, '')).join('\n\n');
-          writeFileAtomic(GLOBAL_LESSONS_FILE, prevG.replace(/\n+$/, '\n') + '\n' + gblock + '\n');
-          globalN = fresh.length;
+        entryDate(e) && Date.parse(entryDate(e)) < cutoff;
+    };
+
+    // DECISIONS → one conventional ADR file each: docs/adr/NNNN-slug.md.
+    {
+      const text = readFileSafe(DECISIONS_FILE);
+      const parsed = text === null ? { entries: [] } : parseEntries(text);
+      const grad = parsed.entries.filter(eligible);
+      if (grad.length === 0) report.push('DECISIONS.md: nothing eligible (>' + GRADUATE_AGE_DAYS + 'd, confidence high, accepted)');
+      else {
+        ensureDir(ADR_DIR);
+        let num = nextAdrNumber();
+        const files = [];
+        for (const e of grad) {
+          const id = String(num).padStart(4, '0');
+          const date = entryField(e, 'date') || todayDate();
+          const body = e.lines.slice(1).filter((l) => !/^- /.test(l)).join('\n').replace(/^\n+|\n+$/g, '');
+          const content = '# ' + id + '. ' + e.title + '\n\n- Date: ' + date + '\n- Status: ' + entryStatus(e) + '\n- Confidence: ' + (entryField(e, 'confidence') || 'med') + '\n\n' + (body ? body + '\n' : '');
+          const fname = id + '-' + adrSlug(e.title) + '.md';
+          writeFileAtomic(path.join(ADR_DIR, fname), content);
+          files.push('docs/adr/' + fname);
+          num++;
         }
+        for (const e of grad) setEntryField(e, 'graduated', todayDate());
+        writeFileAtomic(DECISIONS_FILE, serializeEntries(parsed));
+        report.push('DECISIONS.md: graduated ' + grad.length + ' -> ' + files.join(', '));
       }
-      for (const e of graduating) setEntryField(e, 'graduated', todayDate());
-      writeFileAtomic(p, serializeEntries(parsed));
-      report.push(label + ': graduated ' + graduating.length + ' -> ' + path.relative(CWD, wikiFile) +
-        (globalN ? ' (+' + globalN + ' to global)' : ''));
+    }
+
+    // LESSONS → docs/adr/lessons.md rollup (+ optional ~/.coderecall global).
+    {
+      const text = readFileSafe(LESSONS_FILE);
+      const parsed = text === null ? { entries: [] } : parseEntries(text);
+      const grad = parsed.entries.filter(eligible);
+      if (grad.length === 0) report.push('LESSONS.md: nothing eligible (>' + GRADUATE_AGE_DAYS + 'd, confidence high)');
+      else {
+        ensureDir(ADR_DIR);
+        const lf = path.join(ADR_DIR, 'lessons.md');
+        const prev = readFileSafe(lf) || '# Lessons (graduated)\n';
+        const block = grad.map((e) => e.lines.join('\n').replace(/\n+$/, '')).join('\n\n');
+        writeFileAtomic(lf, prev.replace(/\n+$/, '\n') + '\n' + block + '\n');
+        let globalN = 0;
+        if (toGlobal) {
+          ensureDir(GLOBAL_DIR);
+          const prevG = readFileSafe(GLOBAL_LESSONS_FILE) || '# Global lessons (cross-project, machine/tool scope)\n';
+          const existing = parseEntries(prevG).entries.map((e) => e.title.toLowerCase());
+          const fresh = grad.filter((e) => existing.indexOf(e.title.toLowerCase()) === -1);
+          if (fresh.length) {
+            writeFileAtomic(GLOBAL_LESSONS_FILE, prevG.replace(/\n+$/, '\n') + '\n' + fresh.map((e) => e.lines.join('\n').replace(/\n+$/, '')).join('\n\n') + '\n');
+            globalN = fresh.length;
+          }
+        }
+        for (const e of grad) setEntryField(e, 'graduated', todayDate());
+        writeFileAtomic(LESSONS_FILE, serializeEntries(parsed));
+        report.push('LESSONS.md: graduated ' + grad.length + ' -> docs/adr/lessons.md' + (globalN ? ' (+' + globalN + ' to global)' : ''));
+      }
     }
     console.log('coderecall graduate:');
     for (const r of report) console.log('  ' + r);
   });
+}
+
+/** ADR filename slug: lowercase, non-alnum (keep CJK) → '-', trimmed, capped. */
+function adrSlug(title) {
+  return String(title).toLowerCase().replace(/[^a-z0-9一-鿿]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'decision';
+}
+/** Next ADR sequence number from existing docs/adr/NNNN-*.md files. */
+function nextAdrNumber() {
+  let max = 0;
+  try {
+    for (const n of fs.readdirSync(ADR_DIR)) {
+      const m = /^(\d{4})-/.exec(n);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
+    }
+  } catch (e) { /* no dir yet */ }
+  return max + 1;
 }
 
 // ---------------------------------------------------------------------------
