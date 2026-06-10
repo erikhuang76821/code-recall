@@ -42,11 +42,15 @@
 10. ✅ **[M] 可觀測性**:doctor `[lint]` 段(日期/confidence/checklist 狀態合法性)+ stop.js 維護 bounded `sessions.md` 時間軸(最新 50 筆,連續相同 NOW 去重)。
 11. ✅ **[S] 選配 Git pre-commit hook**(回應「派生狀態用程式碼維護,別靠 AI 自律」的外部建議):`memo install-githook` 在 commit 時重生 AGENTS.md 摘要 + lint 帳本,跨平台(node 產生 hook),marker 合併不覆蓋既有 hook,`--strict` 可阻擋,`deinit` 一併移除。
 
-## v2.0 — 戰略(月級)
+## v2.0 — 戰略(月級) ✅ 已交付 (2026-06-10)
 
-11. **[M] npm 發佈**:`npx memo-star init` — 發佈通道 ≠ 執行期依賴,package 保持零 deps;同時解決絕對路徑搬家斷裂。
-12. **[L] 選配零依賴本機 MCP server(stdio)**:`node memo.js mcp` 暴露 read_memory / write_decision / write_lesson / update_task — 補上「honor-system 寫回」這個架構最弱層,檔案仍是儲存層,AGENTS.md 繼續覆蓋無 MCP 工具。(Gemini 主張全面轉向 MCP、Codex 與兼容稽核主張保留指令層 — 裁決:加法不取代。)
-13. **[L] 知識長青**:`memo graduate` 把 >90 天高信心 DECISIONS/LESSONS 輸出到 llm-wiki(整合而非競爭)+ 選配 `~/.memo-star/GLOBAL-LESSONS.md` 跨專案教訓(僅機器/工具範疇,digest 限 top-N 行)。
+> 註:v1.3 的 git-hook 暫編為「11」,正式併入時重歸 v1.3;v2.0 項次為 12–16。
+
+12. ✅ **[M] npm 發佈**:`package.json` + `bin` → `npx memo-star <cmd>`;發佈通道 ≠ 執行期依賴,**零 runtime deps 維持**;新增 `memo version`。(實際 `npm publish` 需登入/2FA,屬使用者動作。)
+13. ✅ **[L] 選配零依賴本機 MCP server(stdio)**:`memo mcp` 暴露 read_memory / update_task / write_decision / write_lesson / search_memory(newline-delimited JSON-RPC 2.0,tool 錯誤以 isError 回傳)。補上「honor-system 寫回」最弱層,檔案仍是儲存層,AGENTS.md 繼續覆蓋無 MCP 工具。(裁決:加法不取代。)
+14. ✅ **[L] 知識長青**:`memo graduate [--global]` 把 >90 天高信心條目輸出到 `docs/ai_wiki/`(整合 llm-wiki)+ 選配 `~/.memo-star/GLOBAL-LESSONS.md`(可用 `MEMO_STAR_GLOBAL_DIR` 改位置);digest 注入限 top-3 且需 `MEMO_STAR_GLOBAL_LESSONS=1`。
+15. ✅ **[M] 時序/矛盾/過期模型(借鏡 supermemory,零依賴)**:`supersedes`/`superseded-by`/`expires`;upsert 標題重疊改為「標記取代+保留演化」而非靜默覆蓋;consolidate 把 superseded+過期條目退役到 `archive/retired-YYYY-MM.md`。直接硬化「陳舊/矛盾帳本」頭號失效模式。
+16. ✅ **[S] compaction 存活自我驗證**:`memo selftest` / `doctor --selftest` 模擬 `source=compact`,斷言全量 TASK body(8 項檢查);`npm test` 跑它。借 supermemory 的 eval 紀律,不借其 benchmark。
 
 ## 已裁決的評審分歧
 

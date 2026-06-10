@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.0 (2026-06-10)
+
+1. **Temporal / contradiction / expiry model** (borrowed from supermemory, zero-dep): DECISIONS/LESSONS entries support `supersedes:` / `superseded-by:` and an optional `expires: YYYY-MM-DD`. `write`-ing an entry whose title overlaps an existing active one no longer silently overwrites — the old entry is marked `status: superseded` (and kept, so the decision's evolution stays visible and searchable) while the new one records what it supersedes. `consolidate` now **retires** superseded + expired entries to `archive/retired-YYYY-MM.md` (auto-forget), then legacy-dedupes and age-flags. Directly hardens the "stale/contradictory ledger" failure mode.
+2. **`memo doctor --selftest` / `memo selftest`**: spawns the CLI in a throwaway project and asserts the post-compaction digest re-anchors (re-anchor prefix, GOAL/NOW/NEXT, full TASK body, blocked item). Turns the headline compaction-survival claim from assertion into a reproducible regression test (8 checks). `npm test` runs it.
+3. **`memo mcp` — optional zero-dependency stdio MCP server**: exposes `read_memory`, `update_task`, `write_decision`, `write_lesson`, `search_memory` as tools (newline-delimited JSON-RPC 2.0). Closes the honor-system write-back gap by making memory updates a tool call rather than a recited instruction; files remain the storage layer and AGENTS.md still covers tools without MCP. No SDK, no deps.
+4. **`memo graduate [--global]`**: exports DECISIONS/LESSONS older than 90 days with `confidence: high` into `docs/ai_wiki/` (llm-wiki integration — knowledge longevity, not competition); `--global` also appends graduated lessons to `~/.memo-star/GLOBAL-LESSONS.md` (cross-project, override dir via `MEMO_STAR_GLOBAL_DIR`). Non-destructive (entries gain `graduated:` and export once). Opt-in digest injection of the top-3 global lessons via `MEMO_STAR_GLOBAL_LESSONS=1`.
+5. **npm packaging**: `package.json` + `bin` so the tool installs via `npx memo-star <cmd>`; **zero runtime dependencies** preserved (publish channel ≠ runtime dep). Added `memo version`. Bumped to 2.0.0.
+
 ## v1.3 (2026-06-10)
 
 1. **`memo search <query>`**: zero-dependency BM25 lexical search over the whole ledger (TASK paragraphs, DECISIONS/LESSONS entries) plus everything in `archive/`. Tokenizer indexes alphanumeric words and individual CJK characters, so English and Chinese queries both work without an embeddings model, a DB, or network. `--limit N` (default 5); paragraph/entry-level results with score, source, and snippet. This is the deliberate answer to the one gap [COMPATIBILITY.md](COMPATIBILITY.md) admits — "semantic recall over months" — closed lexically rather than with a vector store.

@@ -17,6 +17,16 @@ Chose zero-dep BM25 over embeddings/vector DB to keep the no-daemon/no-network/n
 - confidence: med
 sync --all merges (never overwrites) into .gemini/settings.json (contextFileName) and .cursor/hooks.json (Stop). Cursor's hook schema is young and may change; entry is idempotent and removed by deinit. Plain-quote the node path — do NOT JSON.stringify it first (double-escapes backslashes).
 
+## v2.0 MCP server is zero-dep stdio JSON-RPC, files stay the storage layer
+- date: 2026-06-10
+- confidence: high
+`memo mcp` hand-rolls newline-delimited JSON-RPC 2.0 over stdin/stdout (no SDK → zero deps). Tools: read_memory/update_task/write_decision/write_lesson/search_memory. Tool errors returned with isError:true (model sees them) not as JSON-RPC errors. Closes honor-system write-back without making MCP mandatory — AGENTS.md still covers non-MCP tools.
+
+## Temporal model supersedes (keeps history) rather than overwrites
+- date: 2026-06-10
+- confidence: high
+upsertEntry on >0.8 title overlap marks old `status: superseded` + keeps it (evolution stays searchable), new entry records `supersedes:`. `expires:` enables auto-forget. consolidate retires superseded+expired to archive/retired-YYYY-MM.md. Borrowed from supermemory's temporal/contradiction handling, zero-dep (no LLM/vector).
+
 ## Git pre-commit hook is a memo.js subcommand, not shell in the installers
 - date: 2026-06-10
 - confidence: high

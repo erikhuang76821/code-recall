@@ -12,6 +12,11 @@ Entry format (strict):
 - confidence: high
 First .cursor/hooks.json command came out with quadruple backslashes. Root cause: JSON.stringify(path) doubled the backslashes, then JSON.stringify(obj) doubled them again. Fix: plain-quote the path ('node "'+p+'"'); the final serialize escapes once.
 
+## os.homedir() reads USERPROFILE on Windows, not the HOME env var
+- date: 2026-06-10
+- confidence: high
+A `graduate --global` test set HOME=/tmp/... but node still wrote to the REAL ~/.memo-star (polluted C:\Users\erikhuang). Root cause: on Windows os.homedir() uses USERPROFILE, ignoring HOME. Fix: GLOBAL_DIR honors MEMO_STAR_GLOBAL_DIR env override; tests must use that, not HOME.
+
 ## A git hook whose last command is a non-zero check aborts the commit
 - date: 2026-06-10
 - confidence: high

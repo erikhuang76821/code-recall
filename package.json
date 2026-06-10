@@ -1,0 +1,49 @@
+{
+  "name": "memo-star",
+  "version": "2.0.0",
+  "description": "Zero-dependency, daemon-less persistent memory layer for AI coding agents — survives context compaction, works across IDEs/CLIs. No vector DB, no API keys.",
+  "bin": {
+    "memo-star": "memo.js"
+  },
+  "main": "memo.js",
+  "files": [
+    "memo.js",
+    "hooks/",
+    "templates/",
+    "skills/",
+    "install.ps1",
+    "install.sh",
+    "SPEC.md",
+    "COMPATIBILITY.md",
+    "CHANGELOG.md",
+    "ROADMAP.md"
+  ],
+  "scripts": {
+    "test": "node memo.js selftest"
+  },
+  "engines": {
+    "node": ">=10.12"
+  },
+  "keywords": [
+    "ai",
+    "memory",
+    "llm",
+    "agent",
+    "claude",
+    "claude-code",
+    "cursor",
+    "context",
+    "compaction",
+    "mcp",
+    "zero-dependency"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/erikhuang76821/Memo-star.git"
+  },
+  "homepage": "https://github.com/erikhuang76821/Memo-star#readme",
+  "bugs": {
+    "url": "https://github.com/erikhuang76821/Memo-star/issues"
+  },
+  "license": "MIT"
+}

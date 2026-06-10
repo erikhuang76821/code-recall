@@ -1,4 +1,4 @@
-# Memo-star Compatibility Matrix (v1.3.0)
+# Memo-star Compatibility Matrix (v2.0.0)
 
 > 繁中摘要：Memo-star 對每個工具的支援分三層 — **被動注入**（工具自動載入協定/摘要）、
 > **寫回**（agent 更新帳本的機制：確定性 hooks vs 指令協議「榮譽制」）、
@@ -28,6 +28,6 @@ Three layers, per tool:
 Notes:
 
 - PARTIAL is still useful: because the rules file (with the read-the-ledger protocol) accompanies **every** request, an agent that loses context via compaction is re-instructed to read `.ai/memory/TASK.md` on its next turn. What it loses versus Claude Code: the verbatim snapshot of the pre-compaction conversation tail, and the *immediate* forced re-anchor with the full TASK.md body.
-- Write-back via instruction-protocol is honor-system: well-behaved agents follow it; nothing machine-enforces it. A zero-dependency local MCP front-end to close this gap is on the roadmap (v2.0, optional).
+- Write-back via instruction-protocol is honor-system: well-behaved agents follow it; nothing machine-enforces it. **v2.0 ships the optional zero-dependency MCP server (`memo mcp`)** that closes this gap for any MCP client (Claude Desktop, Cursor, Windsurf, VS Code, Codex, …) by exposing `update_task` / `write_decision` / `write_lesson` as tool calls — still honor-system in that the agent chooses to call them, but now a structured tool rather than a recited instruction, and reliably available cross-tool. Files remain the storage layer.
 - Recall (v1.3): `memo search` provides zero-dependency **lexical** (BM25) recall over the full ledger + archive. This is honestly weaker than the **semantic** recall of a vector store (it matches terms, not meaning), so MemPalace/mem0 still win cross-month *semantic* recall — but Memo-star now answers "where did I decide X / what did I learn about Y" without a DB, embeddings, or network.
 - The `.cursor/hooks.json` Stop entry is best-effort: Cursor's hook schema is younger than Claude Code's and may change. The entry is JSON-merged (idempotent, preserves your other hooks) and removable via `memo deinit`.

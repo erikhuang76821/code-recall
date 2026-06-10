@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /*
- * memo.js — Memo-star single-file zero-dependency CLI. Version 1.3.0.
- * Commands: init | sync [--all] | status | doctor | digest | snapshot | consolidate | search | deinit
+ * memo.js — Memo-star single-file zero-dependency CLI. Version 2.0.0.
+ * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
+ *           consolidate | search | deinit | precommit | install-githook | remove-githook |
+ *           graduate [--global] | mcp | selftest | version
  * Windows-first: path.join everywhere, CRLF-tolerant parsing, no symlinks.
  * Templates are read relative to __dirname so the repo can live anywhere.
  */
@@ -43,6 +45,18 @@ const SEARCH_LIMIT_DEFAULT = 5;        // memo search results shown by default
 const SESSIONS_KEEP = 50;              // bounded sessions.md timeline entries
 const STALE_REMINDER_MINUTES = 45;     // UserPromptSubmit reminder fires after this; also its throttle window
 const CODEX_AGENTS_WARN_BYTES = 32768; // Codex CLI reads ~32KiB of AGENTS.md; warn beyond
+const GRADUATE_AGE_DAYS = 90;          // entries older than this + high confidence may graduate
+const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the digest (opt-in)
+
+const VERSION = '2.0.0';
+const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
+const HOME = os.homedir();
+// Cross-project global store. Overridable via MEMO_STAR_GLOBAL_DIR (testing, or
+// users who relocate it) — note os.homedir() reads USERPROFILE on Windows, not
+// the HOME env var, so an explicit override is the portable way to redirect it.
+const GLOBAL_DIR = process.env.MEMO_STAR_GLOBAL_DIR || path.join(HOME, '.memo-star');
+const GLOBAL_LESSONS_FILE = path.join(GLOBAL_DIR, 'GLOBAL-LESSONS.md');
+const AI_WIKI_DIR = path.join(CWD, 'docs', 'ai_wiki');   // llm-wiki integration target
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -361,6 +375,39 @@ function entryDate(entry) {
   return null;
 }
 
+/** Entry lifecycle status: 'active' (default) or 'superseded'. */
+function entryStatus(entry) {
+  for (const l of entry.lines) {
+    const m = /^- status:\s*(\S+)/.exec(l);
+    if (m) return m[1].toLowerCase();
+  }
+  return 'active';
+}
+
+/** Optional `- expires: YYYY-MM-DD`; returns the date string or null. */
+function entryExpires(entry) {
+  for (const l of entry.lines) {
+    const m = /^- expires:\s*(\d{4}-\d{2}-\d{2})/.exec(l);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/** True when an entry has an expires date strictly before today (auto-forget). */
+function entryExpired(entry) {
+  const e = entryExpires(entry);
+  return e !== null && Date.parse(e) < Date.parse(todayDate());
+}
+
+/** Field value for an arbitrary `- field: value` line, or null. */
+function entryField(entry, field) {
+  for (const l of entry.lines) {
+    const m = new RegExp('^- ' + field + ':\\s*(.*)$').exec(l);
+    if (m) return m[1].trim();
+  }
+  return null;
+}
+
 function setEntryField(entry, field, value) {
   let found = false;
   entry.lines = entry.lines.map((l) => {
@@ -379,9 +426,12 @@ function serializeEntries(parsed) {
 }
 
 /**
- * Dedupe-on-write helper: append an entry to DECISIONS.md/LESSONS.md, but if an
- * existing "## title" overlaps > TITLE_OVERLAP_THRESHOLD (case-insensitive token
- * Jaccard), UPDATE that entry in place (refresh its date) instead of appending.
+ * Temporal write helper (v2.0): append an entry to DECISIONS.md/LESSONS.md. If an
+ * existing ACTIVE entry's title overlaps > TITLE_OVERLAP_THRESHOLD, the old entry
+ * is not overwritten — it is marked `status: superseded` + `superseded-by: <new>`
+ * and kept (so the decision's evolution stays visible and searchable), while the
+ * fresh entry records `supersedes: <old>`. `consolidate` later retires superseded
+ * (and expired) entries to archive. Returns 'appended' or 'superseded'.
  */
 function upsertEntry(filePath, title, bodyLines, confidence) {
   return withLock(() => {
@@ -389,21 +439,21 @@ function upsertEntry(filePath, title, bodyLines, confidence) {
     if (text === null) fail('missing ' + filePath);
     const parsed = parseEntries(text);
     const clean = splitLines(sanitize(bodyLines.join('\n')));
-    const fresh = {
-      title,
-      lines: ['## ' + title, '- date: ' + todayDate(), '- confidence: ' + (confidence || 'med')].concat(clean),
-    };
-    let replaced = false;
-    for (let i = 0; i < parsed.entries.length; i++) {
-      if (titleOverlap(parsed.entries[i].title, title) > TITLE_OVERLAP_THRESHOLD) {
-        parsed.entries[i] = fresh;
-        replaced = true;
-        break;
+    const freshLines = ['## ' + title, '- date: ' + todayDate(), '- confidence: ' + (confidence || 'med')];
+    let supersededTitle = null;
+    for (const e of parsed.entries) {
+      if (entryStatus(e) === 'superseded') continue;
+      if (titleOverlap(e.title, title) > TITLE_OVERLAP_THRESHOLD) {
+        setEntryField(e, 'status', 'superseded');
+        setEntryField(e, 'superseded-by', title);
+        supersededTitle = e.title;
+        break; // supersede the first active match only
       }
     }
-    if (!replaced) parsed.entries.push(fresh);
+    if (supersededTitle) freshLines.push('- supersedes: ' + supersededTitle);
+    parsed.entries.push({ title, lines: freshLines.concat(clean) });
     writeFileAtomic(filePath, serializeEntries(parsed));
-    return replaced ? 'updated' : 'appended';
+    return supersededTitle ? 'superseded' : 'appended';
   });
 }
 
@@ -446,6 +496,14 @@ function newestSnapshotName() {
     }
   }
   return best;
+}
+
+/** Top-N entry titles from the global cross-project lessons file (newest first). */
+function topGlobalLessons(n) {
+  const text = readFileSafe(GLOBAL_LESSONS_FILE);
+  if (text === null) return [];
+  const entries = parseEntries(text).entries;
+  return entries.slice(-n).reverse().map((e) => e.title);
 }
 
 function buildDigest(opts) {
@@ -502,6 +560,18 @@ function buildDigest(opts) {
   const age = taskAgeHours(t);
   if (heartbeatStale() || (age !== null && age > STALE_HOURS)) {
     lines.push('Ledger may be stale — verify before trusting.');
+  }
+  // Optional cross-project lessons (opt-in: MEMO_STAR_GLOBAL_LESSONS=1). Capped at
+  // GLOBAL_LESSONS_TOPN titles, ledger-derived → sanitized + fenced, to honor the
+  // token budget. Off by default so non-opted projects pay nothing.
+  if (process.env.MEMO_STAR_GLOBAL_LESSONS === '1') {
+    const gl = topGlobalLessons(GLOBAL_LESSONS_TOPN);
+    if (gl.length) {
+      lines.push(LEDGER_FENCE_BEGIN);
+      lines.push('Cross-project lessons (top ' + gl.length + '):');
+      for (const t2 of gl) lines.push(neutralizeLedger(sanitize('- ' + t2)));
+      lines.push(LEDGER_FENCE_END);
+    }
   }
   lines.push('Protocol: read .ai/memory/TASK.md before starting work; after each significant step, ' +
     'update the checklist and rewrite NOW:/NEXT:; record decisions in DECISIONS.md and failures in ' +
@@ -948,9 +1018,9 @@ function cmdDoctor() {
   console.log(warnings === 0 ? 'All checks passed.' : warnings + ' warning(s). See above.');
 }
 
-function cmdDigest() {
+function cmdDigest(compact) {
   requireLedger();
-  const digest = buildDigest();
+  const digest = buildDigest({ compact: !!compact });
   if (digest === null) fail('TASK.md missing. Run: node memo.js init');
   process.stdout.write(digest + '\n');
 }
@@ -1036,22 +1106,27 @@ function consolidateLocked() {
     touchTaskUpdated();
   }
 
-  // 2. Dedupe + age-flag DECISIONS.md and LESSONS.md
-  const cutoff = Date.now() - 90 * 24 * 3600000;
+  // 2. Retire (superseded + expired) → archive; legacy-dedupe; age-flag.
+  const cutoff = Date.now() - GRADUATE_AGE_DAYS * 24 * 3600000;
   for (const [label, p] of [['DECISIONS.md', DECISIONS_FILE], ['LESSONS.md', LESSONS_FILE]]) {
     const text = readFileSafe(p);
     if (text === null) continue;
     const parsed = parseEntries(text);
-    // Dedupe: keep newest-dated entry of any overlapping pair.
+    // 2a. Retire superseded (temporal model) + expired (auto-forget) entries.
+    const retired = [];
+    let active = parsed.entries.filter((e) => {
+      if (entryStatus(e) === 'superseded' || entryExpired(e)) { retired.push(e); return false; }
+      return true;
+    });
+    // 2b. Legacy safety dedupe among the remaining active entries (covers
+    // hand-edited dupes that never went through upsertEntry): keep newest-dated.
     const keep = [];
     let deduped = 0;
-    for (const e of parsed.entries) {
+    for (const e of active) {
       let merged = false;
       for (let i = 0; i < keep.length; i++) {
         if (titleOverlap(keep[i].title, e.title) > TITLE_OVERLAP_THRESHOLD) {
-          const dOld = entryDate(keep[i]) || '';
-          const dNew = entryDate(e) || '';
-          if (dNew >= dOld) keep[i] = e;  // newer (or undated-later) wins
+          if ((entryDate(e) || '') >= (entryDate(keep[i]) || '')) keep[i] = e;
           deduped++;
           merged = true;
           break;
@@ -1059,7 +1134,7 @@ function consolidateLocked() {
       }
       if (!merged) keep.push(e);
     }
-    // Flag entries older than 90 days as confidence: low (needs re-verification).
+    // 2c. Flag entries older than GRADUATE_AGE_DAYS as confidence: low.
     let flagged = 0;
     for (const e of keep) {
       const d = entryDate(e);
@@ -1069,9 +1144,15 @@ function consolidateLocked() {
         if (e.lines.join('\n') !== before) flagged++;
       }
     }
+    if (retired.length) {
+      const retFile = path.join(ARCHIVE_DIR, 'retired-' + todayDate().slice(0, 7) + '.md');
+      const prev = readFileSafe(retFile) || '# Retired entries (superseded / expired)\n';
+      const block = retired.map((e) => e.lines.join('\n').replace(/\n+$/, '')).join('\n\n');
+      writeFileAtomic(retFile, prev.replace(/\n+$/, '\n') + '\n## ' + label + ' @ ' + nowIso() + '\n' + block + '\n');
+    }
     parsed.entries = keep;
     writeFileAtomic(p, serializeEntries(parsed));
-    report.push(label + ': ' + deduped + ' duplicate(s) merged, ' + flagged + ' stale entry(ies) flagged confidence: low');
+    report.push(label + ': ' + retired.length + ' retired (superseded/expired), ' + deduped + ' duplicate(s) merged, ' + flagged + ' flagged confidence: low');
   }
 
   // 3. Refresh AGENTS.md digest after consolidation
@@ -1582,23 +1663,288 @@ function cmdRemoveGitHook() {
 }
 
 // ---------------------------------------------------------------------------
+// TASK.md field writer (used by the MCP update_task tool)
+// ---------------------------------------------------------------------------
+/** Set an exact-prefix TASK line (GOAL/NOW/NEXT). Touches UPDATED. Under lock. */
+function setTaskField(field, value) {
+  return withLock(() => {
+    const text = readFileSafe(TASK_FILE);
+    if (text === null) return false;
+    const prefix = field + ': ';
+    const clean = sanitize(String(value).replace(/[\r\n]+/g, ' ')).trim();
+    let found = false;
+    let lines = splitLines(text).map((l) => {
+      if (l.startsWith(prefix)) { found = true; return prefix + clean; }
+      return l;
+    });
+    if (!found) {
+      // Insert after the title line (line 0 is "# TASK") if the field is absent.
+      lines.splice(1, 0, prefix + clean);
+    }
+    lines = lines.map((l) => l.startsWith('UPDATED: ') ? 'UPDATED: ' + nowIso() : l);
+    writeFileAtomic(TASK_FILE, lines.join('\n'));
+    return true;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// selftest — prove the core promise (compaction survival) is reproducible
+// ---------------------------------------------------------------------------
+/**
+ * Spawn this same CLI in a throwaway temp project and assert the post-compaction
+ * digest re-anchors correctly: contains the re-anchor prefix, GOAL/NOW/NEXT, the
+ * full TASK.md body, and a blocked item. Turns the headline claim from assertion
+ * into a reproducible regression test. Returns true on pass.
+ */
+function cmdSelftest() {
+  const cp = require('child_process');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'memo-star-selftest-'));
+  const run = (cmdArgs) => cp.execFileSync(process.execPath, [__filename].concat(cmdArgs), {
+    cwd: tmp, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const checks = [];
+  const check = (name, cond) => { checks.push({ name, ok: !!cond }); };
+  try {
+    run(['init']);
+    const taskFixture = [
+      '# TASK',
+      'GOAL: ship the widget pipeline',
+      'NOW: wiring stage 2 of the pipeline',
+      'NEXT: add backpressure to stage 3',
+      'UPDATED: ' + nowIso(),
+      '',
+      '## Checklist',
+      '- [x] stage 1 done',
+      '- [>] stage 2 in progress',
+      '- [!] stage 3 blocked — waiting on UPSTREAM-42',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8');
+
+    const plain = run(['digest']);
+    check('plain digest has GOAL', /GOAL: ship the widget pipeline/.test(plain));
+    check('plain digest has NOW', /NOW: wiring stage 2/.test(plain));
+    check('plain digest reports blocked item', /Blocked: .*stage 3 blocked/.test(plain));
+    check('plain digest does NOT re-anchor', !/Context was just compacted/.test(plain));
+
+    const compact = run(['digest', '--compact']);
+    check('compact digest re-anchors', /Context was just compacted\. Re-anchor/.test(compact));
+    check('compact digest embeds full TASK body', /--- Full TASK\.md ---/.test(compact));
+    check('compact digest carries NEXT verbatim', /NEXT: add backpressure to stage 3/.test(compact));
+    check('compact digest keeps untrusted fence', /UNTRUSTED-LEDGER-DATA:BEGIN/.test(compact));
+  } catch (e) {
+    check('selftest ran without throwing', false);
+    console.log('  selftest error: ' + (e && e.message ? e.message : String(e)));
+  } finally {
+    rmrf(tmp);
+  }
+  const failed = checks.filter((c) => !c.ok);
+  console.log('memo-star selftest — ' + (checks.length - failed.length) + '/' + checks.length + ' passed');
+  for (const c of checks) console.log('  ' + (c.ok ? 'ok  ' : 'FAIL') + ' ' + c.name);
+  if (failed.length) { process.exitCode = 1; return false; }
+  console.log('Compaction-survival promise verified.');
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// graduate — long-lived knowledge → project ai_wiki + optional global lessons
+// ---------------------------------------------------------------------------
+/**
+ * Export DECISIONS/LESSONS entries older than GRADUATE_AGE_DAYS with confidence
+ * high (and still active) into docs/ai_wiki/ (llm-wiki integration — knowledge
+ * longevity, not competition). With --global, also append graduated LESSONS to
+ * ~/.memo-star/GLOBAL-LESSONS.md (cross-project). Non-destructive: graduated
+ * entries stay in the ledger but gain `- graduated: <date>` so they export once.
+ */
+function cmdGraduate(toGlobal) {
+  requireLedger();
+  return withLock(() => {
+    const cutoff = Date.now() - GRADUATE_AGE_DAYS * 24 * 3600000;
+    const report = [];
+    for (const [label, p, kind] of [['DECISIONS.md', DECISIONS_FILE, 'decisions'], ['LESSONS.md', LESSONS_FILE, 'lessons']]) {
+      const text = readFileSafe(p);
+      if (text === null) continue;
+      const parsed = parseEntries(text);
+      const graduating = parsed.entries.filter((e) =>
+        entryStatus(e) === 'active' &&
+        entryField(e, 'graduated') === null &&
+        entryField(e, 'confidence') === 'high' &&
+        entryDate(e) && Date.parse(entryDate(e)) < cutoff);
+      if (graduating.length === 0) { report.push(label + ': nothing eligible (>' + GRADUATE_AGE_DAYS + 'd, confidence high)'); continue; }
+      ensureDir(AI_WIKI_DIR);
+      const wikiFile = path.join(AI_WIKI_DIR, kind + '.md');
+      const prevWiki = readFileSafe(wikiFile) || '# ' + label.replace('.md', '') + ' (graduated knowledge)\n';
+      const block = graduating.map((e) => e.lines.join('\n').replace(/\n+$/, '')).join('\n\n');
+      writeFileAtomic(wikiFile, prevWiki.replace(/\n+$/, '\n') + '\n' + block + '\n');
+      let globalN = 0;
+      if (toGlobal && kind === 'lessons') {
+        ensureDir(GLOBAL_DIR);
+        const prevG = readFileSafe(GLOBAL_LESSONS_FILE) || '# Global lessons (cross-project, machine/tool scope)\n';
+        const existingTitles = parseEntries(prevG).entries.map((e) => e.title.toLowerCase());
+        const fresh = graduating.filter((e) => existingTitles.indexOf(e.title.toLowerCase()) === -1);
+        if (fresh.length) {
+          const gblock = fresh.map((e) => e.lines.join('\n').replace(/\n+$/, '')).join('\n\n');
+          writeFileAtomic(GLOBAL_LESSONS_FILE, prevG.replace(/\n+$/, '\n') + '\n' + gblock + '\n');
+          globalN = fresh.length;
+        }
+      }
+      for (const e of graduating) setEntryField(e, 'graduated', todayDate());
+      writeFileAtomic(p, serializeEntries(parsed));
+      report.push(label + ': graduated ' + graduating.length + ' -> ' + path.relative(CWD, wikiFile) +
+        (globalN ? ' (+' + globalN + ' to global)' : ''));
+    }
+    console.log('memo-star graduate:');
+    for (const r of report) console.log('  ' + r);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// MCP server (optional, zero-dep, stdio JSON-RPC) — closes the honor-system
+// write-back gap by exposing memory as tools the agent calls. Files remain the
+// storage layer; AGENTS.md still covers tools without MCP. `node memo.js mcp`.
+// stdio transport: newline-delimited JSON-RPC 2.0 messages.
+// ---------------------------------------------------------------------------
+function mcpToolDefs() {
+  const conf = { type: 'string', enum: ['high', 'med', 'low'], description: 'confidence (default med)' };
+  return [
+    { name: 'read_memory', description: 'Read the project memory digest (GOAL/NOW/NEXT, counts, blocked items).',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+    { name: 'update_task', description: 'Update TASK.md GOAL/NOW/NEXT. Provide any subset.',
+      inputSchema: { type: 'object', properties: { goal: { type: 'string' }, now: { type: 'string' }, next: { type: 'string' } }, additionalProperties: false } },
+    { name: 'write_decision', description: 'Record a durable decision (DECISIONS.md). Supersedes an overlapping prior entry.',
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
+    { name: 'write_lesson', description: 'Record a lesson / failure + root cause (LESSONS.md).',
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
+    { name: 'search_memory', description: 'BM25 lexical search across the ledger + archive.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer' } }, required: ['query'], additionalProperties: false } },
+  ];
+}
+
+/** Execute one MCP tool call. Returns a result string (throws → isError). */
+function mcpCallTool(name, args) {
+  args = args || {};
+  if (!fs.existsSync(MEM_DIR)) throw new Error('no ledger in ' + CWD + ' — run `memo init` here first');
+  switch (name) {
+    case 'read_memory': {
+      const d = buildDigest();
+      return d === null ? 'TASK.md missing.' : d;
+    }
+    case 'update_task': {
+      const done = [];
+      for (const f of ['goal', 'now', 'next']) {
+        if (typeof args[f] === 'string' && args[f].length) { setTaskField(f.toUpperCase(), args[f]); done.push(f.toUpperCase()); }
+      }
+      if (!done.length) return 'No fields given. Provide goal/now/next.';
+      return 'Updated: ' + done.join(', ') + '.';
+    }
+    case 'write_decision':
+      if (!args.title || !args.body) throw new Error('title and body are required');
+      return 'DECISIONS.md: ' + upsertEntry(DECISIONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence);
+    case 'write_lesson':
+      if (!args.title || !args.body) throw new Error('title and body are required');
+      return 'LESSONS.md: ' + upsertEntry(LESSONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence);
+    case 'search_memory': {
+      if (!args.query) throw new Error('query is required');
+      const results = bm25Search(String(args.query), collectChunks(), args.limit > 0 ? args.limit : SEARCH_LIMIT_DEFAULT);
+      if (!results.length) return 'No matches for: ' + args.query;
+      return results.map((r) => r.score.toFixed(2) + '  ' + r.chunk.source + (r.chunk.label ? ' > ' + r.chunk.label : '') +
+        '\n    ' + r.chunk.text.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 2).join(' / ')).join('\n');
+    }
+    default:
+      throw new Error('unknown tool: ' + name);
+  }
+}
+
+function cmdMcp() {
+  const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
+  const reply = (id, result) => send({ jsonrpc: '2.0', id, result });
+  const replyErr = (id, code, message) => send({ jsonrpc: '2.0', id, error: { code, message } });
+
+  function handle(msg) {
+    if (!msg || msg.jsonrpc !== '2.0') return;
+    const { id, method, params } = msg;
+    const isNotification = (id === undefined || id === null);
+    try {
+      switch (method) {
+        case 'initialize':
+          return reply(id, {
+            protocolVersion: MCP_PROTOCOL_VERSION,
+            capabilities: { tools: {} },
+            serverInfo: { name: 'memo-star', version: VERSION },
+          });
+        case 'notifications/initialized':
+        case 'notifications/cancelled':
+          return; // notifications: no response
+        case 'ping':
+          return reply(id, {});
+        case 'tools/list':
+          return reply(id, { tools: mcpToolDefs() });
+        case 'tools/call': {
+          const p = params || {};
+          try {
+            const text = mcpCallTool(p.name, p.arguments);
+            return reply(id, { content: [{ type: 'text', text: String(text) }] });
+          } catch (e) {
+            // Tool-level error: report inside the result with isError (per MCP),
+            // so the model sees it rather than the call hard-failing.
+            return reply(id, { content: [{ type: 'text', text: 'Error: ' + (e && e.message ? e.message : String(e)) }], isError: true });
+          }
+        }
+        default:
+          if (!isNotification) replyErr(id, -32601, 'method not found: ' + method);
+          return;
+      }
+    } catch (e) {
+      if (!isNotification) replyErr(id, -32603, 'internal error: ' + (e && e.message ? e.message : String(e)));
+    }
+  }
+
+  let buf = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    buf += chunk;
+    let nl;
+    while ((nl = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let msg = null;
+      try { msg = JSON.parse(line); } catch (e) { continue; } // skip malformed lines
+      handle(msg);
+    }
+  });
+  process.stdin.on('end', () => process.exit(0));
+  // Keep the process alive waiting on stdin.
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
-  const usage = 'usage: node memo.js <init|sync [--all]|status|doctor|digest|snapshot|consolidate|search <query> [--limit N]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook>';
+  const usage = 'usage: node memo.js <init|sync [--all]|status|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|mcp|selftest|version>';
   switch (cmd) {
     case 'init': return cmdInit();
     case 'sync': return cmdSync(args.includes('--all'));
     case 'status': return cmdStatus();
-    case 'doctor': return cmdDoctor();
-    case 'digest': return cmdDigest();
+    case 'doctor':
+      if (args.includes('--selftest')) { cmdDoctor(); console.log(''); cmdSelftest(); return; }
+      return cmdDoctor();
+    case 'digest': return cmdDigest(args.includes('--compact'));
     case 'snapshot': return cmdSnapshot();
     case 'consolidate': return cmdConsolidate();
     case 'precommit': return cmdPrecommit(args.includes('--strict'));
     case 'install-githook': return cmdInstallGitHook(args.includes('--strict'));
     case 'remove-githook': return cmdRemoveGitHook();
+    case 'graduate': return cmdGraduate(args.includes('--global'));
+    case 'mcp': return cmdMcp();
+    case 'selftest': return cmdSelftest();
+    case 'version':
+    case '--version':
+    case '-v':
+      console.log('memo-star ' + VERSION);
+      return;
     case 'search': {
       let limit = SEARCH_LIMIT_DEFAULT;
       const terms = [];

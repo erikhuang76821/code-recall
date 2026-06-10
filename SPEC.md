@@ -69,9 +69,14 @@ UPDATED: 2026-06-10T12:34:56+08:00
 ## <short title>
 - date: 2026-06-10
 - confidence: high|med|low
+- expires: 2026-09-01        (optional — auto-forget on/after this date)
+- status: superseded         (optional — set automatically when superseded)
+- superseded-by: <new title> (optional — back-link to the replacement)
+- supersedes: <old title>    (optional — forward-link from the replacement)
+- graduated: 2026-06-10       (optional — exported to docs/ai_wiki once)
 <body, 1-3 lines. LESSONS entries must state what failed AND root cause.>
 ```
-Dedupe rule: before appending, if an existing `##` title matches case-insensitively at >0.8 token overlap, UPDATE that entry (refresh date) instead of appending.
+Temporal write rule (v2.0): before appending, if an existing ACTIVE `##` title matches case-insensitively at >0.8 token overlap, the old entry is marked `status: superseded` + `superseded-by:` (kept for history, not overwritten) and the new entry records `supersedes:`. `consolidate` retires superseded + expired entries to `archive/retired-YYYY-MM.md`.
 
 ## Hook contract (Claude Code)
 
@@ -148,6 +153,10 @@ Drift detection: `memo status` recomputes checksums of marker sections; reports 
 - `consolidate` — archive completed checklist items: a TOP-LEVEL `[x]` item is moved to archive/ together with its contiguous indented block (blank lines inside the block are allowed when the next non-blank line is still indented), but only when no indented child checklist item is still open (`[ ]`/`[>]`/`[!]`). Archived items roll into a MONTHLY `archive/consolidated-YYYY-MM.md`. Also dedupe DECISIONS/LESSONS, flag entries with date older than 90 days as `confidence: low` for re-verification.
 - `deinit [--yes]` — per-project removal. Dry-run (prints plan) without `--yes`. Strips MEMO-STAR marker sections from AGENTS.md + shared files (preserving user content), deletes memo-star-owned stubs, un-merges Gemini/Cursor config entries, strips the git pre-commit hook block, removes the `@AGENTS.md` import, deletes the ledger last. Never touches `~/.claude/settings.json`.
 - `precommit [--strict]` — refresh the AGENTS.md digest from TASK.md and lint the ledger. Exit 0 normally (advisory); `--strict` exits 1 on lint issues so a git pre-commit hook blocks the commit. Run by the installed hook, not usually by hand.
+- `graduate [--global]` — export DECISIONS/LESSONS older than 90 days with `confidence: high` (and still active) into `docs/ai_wiki/<decisions|lessons>.md` (llm-wiki integration). `--global` also appends graduated lessons to `~/.memo-star/GLOBAL-LESSONS.md` (override the dir via `MEMO_STAR_GLOBAL_DIR`; note `os.homedir()` reads `USERPROFILE` on Windows). Non-destructive: graduated entries gain `- graduated: <date>` and are exported once.
+- `mcp` — run the optional zero-dependency stdio MCP server (see below).
+- `selftest` (also `doctor --selftest`) — reproducible compaction-survival regression test; exit 1 on failure.
+- `version` (`--version`, `-v`) — print the version.
 - `install-githook [--strict]` / `remove-githook` — install/remove a `.git/hooks/pre-commit` managed block (honors `core.hooksPath`). The block guards on `[ -d .ai/memory ]`, runs `memo precommit` (or `precommit --strict` when installed with `--strict`), and `git add`s AGENTS.md/CLAUDE.md when git already tracks them. Default is advisory (lint issues warn, commit proceeds); `--strict` bakes blocking into the hook (lint issues abort the commit). Idempotent (marker `# >>> memo-star >>>`); merges into and preserves an existing hook; `remove` deletes the file only if it held nothing but our block. Paths are forward-slashed and shell-unsafe paths are refused.
 
 ## Optional hook (default OFF)
@@ -156,6 +165,11 @@ Not registered by the installers (token discipline is SPEC priority #5). When th
 
 ### Observability files
 - `.ai/memory/sessions.md` — bounded timeline (newest `SESSIONS_KEEP`=50 entries) appended by the Stop hook: `- <iso> — <NOW>`. Consecutive identical NOW values are de-duplicated. Whole-file atomic replace, no lock (last-writer-wins is acceptable for a timeline; Stop must never block).
+
+## Optional MCP server (`memo mcp`, v2.0)
+Zero-dependency stdio JSON-RPC 2.0 server (newline-delimited messages). Speaks `initialize` (protocolVersion `2024-11-05`, capabilities `{tools:{}}`, serverInfo `{name:"memo-star",version}`), `tools/list`, `tools/call`, `ping`, and ignores `notifications/*`. Tools:
+- `read_memory` → the digest. `update_task {goal?,now?,next?}` → set TASK fields (touches UPDATED). `write_decision {title,body,confidence?}` / `write_lesson {...}` → temporal upsert (supersede-aware). `search_memory {query,limit?}` → BM25.
+- Tool errors are returned inside the result with `isError:true` (the model sees them) rather than as JSON-RPC errors. The server binds ledger paths to its launch cwd; tools error cleanly if `.ai/memory/` is absent. Purpose: close the honor-system write-back gap by making memory updates a tool call — files stay the storage layer; AGENTS.md still covers tools without MCP.
 
 ## Concurrency
 - Every ledger/stub/marker-section write goes through `writeFileAtomic` (write to `<file>.tmp.<pid>`, then `fs.renameSync` — atomic on NTFS and POSIX), so readers never see half-written files.
