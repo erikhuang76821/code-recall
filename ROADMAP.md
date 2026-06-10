@@ -33,13 +33,14 @@
 4. **[S] Digest 升級**:注入 `[!]` blocked 項目全文(agent 必須知道為何卡住)、compact 後附最新快照路徑、AGENTS.md 協議加一行過期自查。驗收:fresh digest 仍 ≤1200 字元。
 5. **[S] 衛生包**:備份檔輪替(留 5)、README 標注 Node ≥10.12 地板、鎖等待的 SharedArrayBuffer fallback。
 
-## v1.3 — 中期(週級)
+## v1.3 — 中期(週級) ✅ 已交付 (2026-06-10)
 
-6. **[M] `memo search`**:零依賴 BM25/TF-IDF 詞法搜尋(帳本 + archive,段落級結果);consolidate 改為壓縮成月度摘要而非刪除。回應 MemPalace 使用者最想念的功能。
-7. **[M] 跨工具深化**:Gemini 走 `.gemini/settings.json` context.fileName 原生載入、產出 `.cursor/hooks.json` stop 心跳、AGENTS.md 內嵌摘要加「as of」戳記、doctor 警告 Codex ~32KiB 上限。
-8. **[S] `memo deinit`**:專案級乾淨移除(刪帳本、剝 marker 區段、刪自有 stub,共享檔使用者內容逐位元保留)。
-9. **[S] 選配 UserPromptSubmit 過期提醒 hook(預設關)**:帳本 >45 分鐘未更新時注入一行 ~15 token 提醒,節流不重複。
-10. **[M] 可觀測性**:doctor 格式 lint(日期/confidence/狀態合法性)+ stop.js 維護 bounded sessions.md 時間軸(回答「上週二做了什麼」)。
+6. ✅ **[M] `memo search`**:零依賴 BM25 詞法搜尋(帳本 + archive,段落/條目級結果,中英混合 tokenizer);consolidate 改為月度歸檔 `consolidated-YYYY-MM.md` 而非刪除。回應 MemPalace 使用者最想念的功能。
+7. ✅ **[M] 跨工具深化**:Gemini 走 `.gemini/settings.json` contextFileName 原生載入、產出 `.cursor/hooks.json` stop 心跳(best-effort, JSON merge)、AGENTS.md 內嵌摘要加「Ledger as of」戳記、doctor 警告 Codex ~32KiB 上限。
+8. ✅ **[S] `memo deinit`**:專案級乾淨移除(dry-run 預設,`--yes` 執行;剝 marker 區段、刪自有 stub、還原 Gemini/Cursor 設定、刪帳本,共享檔使用者內容逐位元保留;不動全域 hooks)。
+9. ✅ **[S] 選配 UserPromptSubmit 過期提醒 hook(預設關)**:`hooks/userpromptsubmit.js`,帳本 >45 分鐘未更新時注入一行 ~15 token 提醒,以 `.reminder` 節流(每 45 分鐘最多一次)。
+10. ✅ **[M] 可觀測性**:doctor `[lint]` 段(日期/confidence/checklist 狀態合法性)+ stop.js 維護 bounded `sessions.md` 時間軸(最新 50 筆,連續相同 NOW 去重)。
+11. ✅ **[S] 選配 Git pre-commit hook**(回應「派生狀態用程式碼維護,別靠 AI 自律」的外部建議):`memo install-githook` 在 commit 時重生 AGENTS.md 摘要 + lint 帳本,跨平台(node 產生 hook),marker 合併不覆蓋既有 hook,`--strict` 可阻擋,`deinit` 一併移除。
 
 ## v2.0 — 戰略(月級)
 

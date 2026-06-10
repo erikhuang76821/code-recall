@@ -3,10 +3,11 @@
  * memo-star Stop hook
  *
  * Lightweight end-of-turn heartbeat. Maintains .ai/memory/.heartbeat with
- * the last-stop timestamp. Staleness is NOT computed here: buildDigest in
- * memo.js derives it from TASK.md's UPDATED age (it still honors a legacy
- * STALE heartbeat line for back-compat, but this hook no longer writes one).
- * Never blocks, never outputs anything, always exits 0.
+ * the last-stop timestamp, and appends a bounded entry to the sessions.md
+ * timeline (de-duplicated on unchanged NOW). Staleness is NOT computed here:
+ * buildDigest in memo.js derives it from TASK.md's UPDATED age (it still
+ * honors a legacy STALE heartbeat line for back-compat, but this hook no
+ * longer writes one). Never blocks, never outputs anything, always exits 0.
  * Standalone: run with `node stop.js`.
  */
 'use strict';
@@ -83,6 +84,11 @@ async function main() {
     }
   } catch (e) {
     // read-only fs — ignore
+  }
+  // Bounded sessions timeline (best-effort; never blocks). Only when memo.js
+  // loaded — appendSession is a whole-file atomic replace, no lock.
+  if (memo && typeof memo.appendSession === 'function') {
+    try { memo.appendSession(); } catch (e) { /* best effort */ }
   }
   // Stop hooks must never output anything that interrupts the agent.
 }

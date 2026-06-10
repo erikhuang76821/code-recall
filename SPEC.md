@@ -22,7 +22,8 @@ Memo-star/
   hooks/
     sessionstart.js    # SessionStart hook (matchers: startup|resume|clear|compact)
     precompact.js      # PreCompact hook (matchers: auto|manual)
-    stop.js            # Stop hook — lightweight end-of-turn snapshot refresh
+    stop.js            # Stop hook — heartbeat + bounded sessions.md timeline
+    userpromptsubmit.js # OPTIONAL (default off) — staleness reminder, throttled
   templates/           # ledger + stub templates used by `memo init`/`sync`
   install.ps1          # installs global hooks into ~/.claude/settings.json (MERGE, never clobber)
   install.sh           # same for macOS/Linux
@@ -38,7 +39,8 @@ Memo-star/
     TASK.md        # episodic/working: goal, checklist (todo/doing/done/blocked), NOW:, NEXT:
     DECISIONS.md   # semantic: constraints, choices, discovered facts; each entry dated
     LESSONS.md     # procedural + tried-and-failed: "do not retry X because Y"
-    archive/       # completed phases moved here by consolidation
+    sessions.md    # bounded timeline of NOW: per turn (Stop hook; newest 50)
+    archive/       # completed phases moved here by consolidation (monthly rollups)
   AGENTS.md        # canonical instruction file; contains memory protocol between markers
   CLAUDE.md        # stub: "@AGENTS.md" import (only created/patched if needed)
   (+ optional per-tool stubs via `memo sync --all`)
@@ -137,12 +139,23 @@ Drift detection: `memo status` recomputes checksums of marker sections; reports 
 
 ## CLI commands (memo.js)
 - `init` — create .ai/memory/* from templates, AGENTS.md section, CLAUDE.md stub. Prints next step (run install.ps1 once per machine for hooks).
-- `sync [--all]` — refresh marker sections + stubs.
+- `sync [--all]` — refresh marker sections + stubs. With `--all` also: namespaced stubs (Cursor/Windsurf/Cline/Roo), shared-file marker sections (Copilot/GEMINI.md), a non-destructive merge into `.gemini/settings.json` (`contextFileName` includes AGENTS.md), and a `.cursor/hooks.json` Stop-heartbeat entry (best-effort, idempotent).
 - `status` — show GOAL/NOW/NEXT, checklist counts, file token estimates, drift, staleness.
-- `doctor` — verify hooks installed, settings.json sane, ledger sizes within budget (warn > ~4KB/file), date staleness.
+- `doctor` — verify hooks installed, settings.json sane, ledger sizes within budget (warn > ~4KB/file), date staleness, AGENTS.md within the Codex ~32KiB read window, plus a `[lint]` pass: DECISIONS/LESSONS entries must carry a valid `- date: YYYY-MM-DD` and `- confidence: high|med|low`; TASK checklist states must be one of `[ ] [>] [x] [!]`.
 - `digest` — print the sessionstart digest (used by hook + debugging).
 - `snapshot` — manual precompact-style snapshot.
-- `consolidate` — archive completed checklist items: a TOP-LEVEL `[x]` item is moved to archive/ together with its contiguous indented block (blank lines inside the block are allowed when the next non-blank line is still indented), but only when no indented child checklist item is still open (`[ ]`/`[>]`/`[!]`). Also dedupe DECISIONS/LESSONS, flag entries with date older than 90 days as `confidence: low` for re-verification.
+- `search <query> [--limit N]` — zero-dep BM25 lexical search over ledger + archive (paragraph blocks for TASK/archive, one chunk per `##` entry for DECISIONS/LESSONS). Tokenizes alphanumeric words and individual CJK characters. Read-only (no lock). Default N=5.
+- `consolidate` — archive completed checklist items: a TOP-LEVEL `[x]` item is moved to archive/ together with its contiguous indented block (blank lines inside the block are allowed when the next non-blank line is still indented), but only when no indented child checklist item is still open (`[ ]`/`[>]`/`[!]`). Archived items roll into a MONTHLY `archive/consolidated-YYYY-MM.md`. Also dedupe DECISIONS/LESSONS, flag entries with date older than 90 days as `confidence: low` for re-verification.
+- `deinit [--yes]` — per-project removal. Dry-run (prints plan) without `--yes`. Strips MEMO-STAR marker sections from AGENTS.md + shared files (preserving user content), deletes memo-star-owned stubs, un-merges Gemini/Cursor config entries, strips the git pre-commit hook block, removes the `@AGENTS.md` import, deletes the ledger last. Never touches `~/.claude/settings.json`.
+- `precommit [--strict]` — refresh the AGENTS.md digest from TASK.md and lint the ledger. Exit 0 normally (advisory); `--strict` exits 1 on lint issues so a git pre-commit hook blocks the commit. Run by the installed hook, not usually by hand.
+- `install-githook` / `remove-githook` — install/remove a `.git/hooks/pre-commit` managed block (honors `core.hooksPath`). The block guards on `[ -d .ai/memory ]`, runs `memo precommit`, and `git add`s AGENTS.md/CLAUDE.md when git already tracks them. Idempotent (marker `# >>> memo-star >>>`); merges into and preserves an existing hook; `remove` deletes the file only if it held nothing but our block. Paths are forward-slashed and shell-unsafe paths are refused.
+
+## Optional hook (default OFF)
+### userpromptsubmit.js (UserPromptSubmit)
+Not registered by the installers (token discipline is SPEC priority #5). When the user adds it as a UserPromptSubmit hook, it injects one `additionalContext` reminder (~15 tokens, memo-star's own text — no untrusted-data fence) once TASK.md `UPDATED` is older than 45 min, throttled to at most once per 45-min window via `.ai/memory/.reminder`. Never throws; exits 0.
+
+### Observability files
+- `.ai/memory/sessions.md` — bounded timeline (newest `SESSIONS_KEEP`=50 entries) appended by the Stop hook: `- <iso> — <NOW>`. Consecutive identical NOW values are de-duplicated. Whole-file atomic replace, no lock (last-writer-wins is acceptable for a timeline; Stop must never block).
 
 ## Concurrency
 - Every ledger/stub/marker-section write goes through `writeFileAtomic` (write to `<file>.tmp.<pid>`, then `fs.renameSync` — atomic on NTFS and POSIX), so readers never see half-written files.

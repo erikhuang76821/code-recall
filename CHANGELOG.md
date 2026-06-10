@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.3 (2026-06-10)
+
+1. **`memo search <query>`**: zero-dependency BM25 lexical search over the whole ledger (TASK paragraphs, DECISIONS/LESSONS entries) plus everything in `archive/`. Tokenizer indexes alphanumeric words and individual CJK characters, so English and Chinese queries both work without an embeddings model, a DB, or network. `--limit N` (default 5); paragraph/entry-level results with score, source, and snippet. This is the deliberate answer to the one gap [COMPATIBILITY.md](COMPATIBILITY.md) admits — "semantic recall over months" — closed lexically rather than with a vector store.
+2. **Cross-tool deepening** (`sync --all`): Gemini CLI now loads `AGENTS.md` natively via a non-destructive merge into `.gemini/settings.json` (`contextFileName`); a `.cursor/hooks.json` Stop heartbeat is registered (best-effort, JSON-merged, idempotent); the AGENTS.md embedded digest gained a `Ledger as of:` freshness stamp; and `doctor` warns when AGENTS.md exceeds the Codex CLI ~32KiB read window.
+3. **`memo deinit`**: clean per-project removal. Dry-run by default (prints the full plan); `--yes` to apply. Strips the MEMO-STAR marker section from AGENTS.md and shared files (user content preserved byte-for-byte), deletes memo-star-owned stubs, un-merges the Gemini/Cursor config entries, removes the `@AGENTS.md` import, and deletes the ledger last. Global hooks in `~/.claude/settings.json` are left untouched.
+4. **Observability**: `doctor` gained a `[lint]` section that flags DECISIONS/LESSONS entries with a missing/invalid `date` or `confidence` and TASK.md checklist lines with an invalid state char. The Stop hook now appends to a bounded `.ai/memory/sessions.md` timeline (newest 50 entries, consecutive-identical-NOW de-duplicated) so you can answer "what was I doing last Tuesday".
+5. **Optional staleness reminder** (`hooks/userpromptsubmit.js`, default OFF): when registered as a UserPromptSubmit hook, injects a single ~15-token reminder once the ledger is >45 min stale, throttled to at most once per 45-min window. Opt-in to honor SPEC token discipline; see README.
+6. **Consolidation**: completed checklist items now roll into a monthly `archive/consolidated-YYYY-MM.md` instead of a per-day file — fewer, denser, still fully `memo search`-able. Nothing is deleted.
+7. **Git pre-commit integration** (`memo install-githook` / `precommit` / `remove-githook`): derived state is maintained by code, not the agent's goodwill. The hook refreshes the AGENTS.md digest from TASK.md and lints the ledger at commit time, re-staging the managed files (AGENTS.md/CLAUDE.md) only when git already tracks them. Implemented as memo.js subcommands (node writes the hook), so it behaves identically on Windows (Git for Windows runs hooks through bundled sh) and POSIX. Merges into an existing `pre-commit` (marker block, idempotent, preserves your logic); `--strict` makes malformed entries block the commit; `deinit` strips it.
+
 ## v1.2 (2026-06-10)
 
 1. **Windsurf stub fixed**: `.windsurf/rules/memo-star.md` now starts with the required frontmatter (`trigger: always_on`, description) so the rule is actually applied on every request.

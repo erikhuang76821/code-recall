@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
-[![Version](https://img.shields.io/badge/version-1.2-orange.svg)](ROADMAP.md)
+[![Version](https://img.shields.io/badge/version-1.3-orange.svg)](ROADMAP.md)
 
 **Memo-star** 是一個極致輕量的「跨工具 AI 記憶持久化層」。它不需要常駐程式 (Daemon-less)、不需要資料庫、也不需要 API Key。透過純 Markdown 檔案與 Hook 機制，讓您的 AI Coding Agents（如 Claude Code、Cursor、Windsurf 等）擁有過目不忘的長期記憶。
 
@@ -132,7 +132,9 @@ Memo-star 透過監聽 AI 工具的生命週期 (Lifecycle Hooks)，實現自動
 | ✅ Cursor | AGENTS.md 指令型 Hook + sync stub |
 | ✅ GitHub Copilot | AGENTS.md 指令型 Hook + sync stub |
 | ✅ Windsurf | AGENTS.md 指令型 Hook + sync stub |
-| ✅ Cline / Roo / Codex CLI | AGENTS.md 指令型 Hook + sync stub |
+| ✅ Cline / Roo | AGENTS.md 指令型 Hook + sync stub |
+| ✅ Gemini CLI | `.gemini/settings.json` 原生載入 AGENTS.md（`sync --all`） |
+| ✅ Codex CLI | AGENTS.md 指令型 Hook（`doctor` 會警告超過 ~32KiB 讀取上限） |
 | 🔜 持續新增中... | 歡迎提交 PR！ |
 
 ---
@@ -144,7 +146,7 @@ Memo-star 透過監聽 AI 工具的生命週期 (Lifecycle Hooks)，實現自動
 | 自動擷取 Auto-capture | ✅ hooks，零手動 | ✅ hooks | ✅ hooks（逐字 verbatim） | ⚠️ 需程式整合 SDK integration | ⚠️ 不定期、不可控 opportunistic |
 | Compaction 存活 Compaction survival* | ✅ Claude Code / 🟡 其他 others（見 COMPATIBILITY.md） | ⚠️ 部分 partial | 🟡 部分 partial（有快照、無重錨定注入） | ❌ 與 context 無關 context-unaware | ❌ |
 | 跨工具 Cross-tool | ✅ AGENTS.md + 各工具 stub | ❌ 僅 Claude Code | 🟡 部分 partial（MCP clients） | ⚠️ 需各自整合 per-app | ❌ 鎖在單一工具 single tool |
-| 跨月語意召回 Semantic recall | ❌ 無（v1.3 規劃詞法搜尋） | ⚠️ | ✅ | ✅ 向量檢索 vector recall | ❌ |
+| 跨月語意召回 Semantic recall | 🟡 詞法搜尋 lexical（`memo search`, BM25, v1.3） | ⚠️ | ✅ 語意 semantic | ✅ 向量檢索 vector recall | ❌ |
 | 免 daemon No daemon | ✅ 純檔案 plain files | ❌ worker + DB | ✅ | ❌ 服務/API service | ✅ |
 | Windows | ✅ 第一優先 first-class | ⚠️ | ⚠️ 弱 weak | ⚠️ | ✅ |
 
@@ -153,6 +155,62 @@ Memo-star 透過監聽 AI 工具的生命週期 (Lifecycle Hooks)，實現自動
 ---
 
 ## 🛠️ 進階用法 (Advanced Usage)
+
+### 搜尋記憶 (Search)
+
+跨整個帳本與 `archive/`（含歷史快照與月度歸檔）做零依賴 BM25 詞法搜尋，英文與中文查詢皆可，無需向量資料庫：
+
+```sh
+node memo.js search "idempotency key"        # 預設回傳 5 筆
+node memo.js search redis 重試 --limit 3      # 中英混合、限制筆數
+```
+
+結果為段落／條目級，附相關度分數、來源檔與摘要。這正是用來補上「跨月召回」的能力 —— 以詞法而非向量達成。
+
+### 移除 (Deinit)
+
+把 memo-star 從單一專案乾淨移除。預設只印出計畫（dry-run），加 `--yes` 才真正執行：
+
+```sh
+node memo.js deinit          # 預覽將刪除/還原的項目
+node memo.js deinit --yes    # 實際移除
+```
+
+會剝除 AGENTS.md 與共享檔（GEMINI.md / copilot）的 MEMO-STAR 區段（**逐位元保留你的其他內容**）、刪除 memo-star 自有 stub、還原 Gemini/Cursor 設定、移除 `@AGENTS.md` import，最後刪除帳本。**不會**動到 `~/.claude/settings.json` 的全域 hooks（那些用安裝腳本的 `-Uninstall` 移除）。
+
+### 時間軸 (Sessions timeline)
+
+Stop hook 會在 `.ai/memory/sessions.md` 維護一份有上限（最新 50 筆）的時間軸，記錄每次回合的 `NOW:`，連續相同則去重。要回答「上週二我在做什麼」時很有用。
+
+### 選配：過期提醒 hook (Optional staleness reminder, default OFF)
+
+為遵守 token 紀律，這個 hook 預設**不安裝**。若要啟用，在 `~/.claude/settings.json` 的 `hooks` 加入 UserPromptSubmit：
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "node \"<path>\\Memo-star\\hooks\\userpromptsubmit.js\"" } ] }
+    ]
+  }
+}
+```
+
+當 `TASK.md` 超過 45 分鐘未更新時，會注入一行 ~15 token 的提醒，且每 45 分鐘最多一次（節流）。
+
+### 選配：Git pre-commit hook（讓程式碼維護派生狀態）
+
+與其指望 AI 自律更新摘要，不如讓**程式碼在 commit 時自動維護**。安裝後，每次 commit 會自動以 `TASK.md` 重生 `AGENTS.md` 的嵌入摘要、lint 帳本格式，並在 git 已追蹤這些檔案時自動 re-stage：
+
+```sh
+node memo.js install-githook     # 寫入 .git/hooks/pre-commit（合併、不覆蓋既有 hook）
+node memo.js remove-githook      # 移除（保留你其他的 hook 邏輯）
+```
+
+- 跨平台：用 node 產生 hook 檔，Windows（Git for Windows 透過內建 sh 執行）與 POSIX 行為一致。
+- 預設**不阻擋** commit（只刷新 + 警告）。要讓格式錯誤的條目擋下 commit，把 hook 內的指令加上 `--strict`。
+- 冪等：以 `# >>> memo-star >>>` marker 區段管理；`deinit` 會一併移除。
+- 需要繞過一次：`git commit --no-verify`。
 
 ### 記憶瘦身 (Consolidation)
 
@@ -203,7 +261,8 @@ node memo.js doctor   # 完整健診（hooks / 帳本 / 路徑）
 - 執行 `node memo.js consolidate` 歸檔已完成項目並去重。`doctor` 會在單檔 > ~4KB 時警告。
 
 **解除安裝**
-- `install.ps1 -Uninstall`（或 `install.sh --uninstall`）只移除 memo-star 的 hook 項目，其餘設定原封不動；專案內刪除 `.ai/memory/` 與 AGENTS.md 標記區段即可。
+- 全域 hooks：`install.ps1 -Uninstall`（或 `install.sh --uninstall`）只移除 memo-star 的 hook 項目，其餘設定原封不動。
+- 單一專案：`node memo.js deinit`（預覽）→ `node memo.js deinit --yes`（執行），會保留你在共享檔中的內容。
 
 ---
 
