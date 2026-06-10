@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="[docs/assets/banner.png](https://chatgpt.com/backend-api/estuary/content?id=file_000000001bac720b82920e0d12e9080d&ts=494749&p=fs&cid=1&sig=c31b5024f4ad170c5f808353761fd4096a2a4cce5f28deb880dd6c7f40e70538&v=0)" alt="Code Recall — Decision Persistence Layer for AI Coding" width="100%">
+  <img src="https://chatgpt.com/backend-api/estuary/content?id=file_000000001bac720b82920e0d12e9080d&ts=494749&p=fs&cid=1&sig=c31b5024f4ad170c5f808353761fd4096a2a4cce5f28deb880dd6c7f40e70538&v=0" alt="Code Recall — Decision Persistence Layer for AI Coding" width="100%">
 </p>
 
 # 🌟 Code Recall — your coding agent's decision log / 你的 coding agent 的決策日誌
