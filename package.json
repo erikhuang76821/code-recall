@@ -1,6 +1,6 @@
 {
   "name": "coderecall",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "Zero-dependency, daemon-less persistent memory layer for AI coding agents — survives context compaction, works across IDEs/CLIs. No vector DB, no API keys.",
   "bin": {
     "coderecall": "coderecall.js"

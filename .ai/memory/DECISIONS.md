@@ -74,3 +74,11 @@ Implemented install-githook/precommit/remove-githook in coderecall.js (node writ
 - date: 2026-06-10
 - confidence: high
 UserPromptSubmit reminder is opt-in (installers don't register it) because token discipline is SPEC priority #5. Throttled via .reminder to at most once per 45-min window.
+
+## Reliable capture via friction-reduction + advisory nudge, not Stop-hook coercion
+- date: 2026-06-10
+- status: accepted
+- confidence: high
+**Context:** decision log's value depends on write-back actually happening (honor-system risk)
+**Decision:** add a one-line  CLI + a pre-commit advisory nudge; leave score undistorted
+**Consequences:** non-coercive, on-brand; capture is easier + prompted at the commit checkpoint, never blocks

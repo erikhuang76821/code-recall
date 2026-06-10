@@ -114,6 +114,7 @@ node coderecall.js <command>      # 或發佈後：npx coderecall <command>
 | `status` | 顯示 GOAL/NOW/NEXT、checklist、檔案大小、漂移、新鮮度 |
 | `doctor [--selftest]` | 健診（hooks/帳本/路徑/lint/Codex 32KiB）；`--selftest` 加跑回歸測試 |
 | `score [--json]` | 評估工作狀態健康度（GOAL 清晰度 / NEXT 可執行性 / blockers 有無理由 / 新鮮度） |
+| `decision "<title>" [--context/--decision/--consequences/--status/--confidence]` | 一行記下一筆 ADR 決策（含 supersede 既有重疊決策） |
 | `search <query> [--limit N]` | 零依賴 BM25 詞法搜尋（帳本 + archive，中英皆可） |
 | `digest [--compact]` | 印出 session 注入用摘要（除錯用） |
 | `consolidate` | 歸檔完成項目（月度）、退役 superseded/過期條目、去重、老化降級 |
@@ -235,6 +236,19 @@ DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈：寫入
 { "mcpServers": { "coderecall": { "command": "node", "args": ["<path>/code-recall/coderecall.js", "mcp"] } } }
 ```
 零依賴 stdio JSON-RPC，暴露 `read_memory` / `update_task` / `write_decision` / `write_lesson` / `search_memory`。把「榮譽制寫回」變成工具呼叫；檔案仍是儲存層，AGENTS.md 繼續覆蓋無 MCP 的工具。
+
+### ✍️ 可靠捕捉決策（reliable capture）
+
+決策日誌只有在「真的被記下來」時才有價值。Code Recall 用兩個**非脅迫**的槓桿降低漏記：
+
+```sh
+node coderecall.js decision "Adopt hexagonal architecture" \
+  --context "billing 邏輯與 HTTP 糾纏" --decision "ports/adapters" --consequences "更多樣板但好測"
+```
+
+- **降低摩擦**：`decision` 一行就記一筆 ADR（或用 MCP `write_decision`，agent 直接呼叫）。
+- **在對的關卡輕推**：git pre-commit 若偵測到你 commit 了原始碼卻沒記任何決策，會印**一行勸告**（永不阻擋；不是每回合的 Stop hook 嘮叨）。
+- 不靠脅迫式 prompt——真正的把關交給 commit 閘 + 人；提示只是提示。
 
 ### 🪝 選配：Git pre-commit 閘門（讓程式碼維護派生狀態）
 

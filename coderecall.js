@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.3.0.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.4.0.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -48,7 +48,7 @@ const CODEX_AGENTS_WARN_BYTES = 32768; // Codex CLI reads ~32KiB of AGENTS.md; w
 const GRADUATE_AGE_DAYS = 90;          // entries older than this + high confidence may graduate
 const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the digest (opt-in)
 
-const VERSION = '2.3.0';
+const VERSION = '2.4.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -433,13 +433,14 @@ function serializeEntries(parsed) {
  * fresh entry records `supersedes: <old>`. `consolidate` later retires superseded
  * (and expired) entries to archive. Returns 'appended' or 'superseded'.
  */
-function upsertEntry(filePath, title, bodyLines, confidence) {
+function upsertEntry(filePath, title, bodyLines, confidence, status) {
   return withLock(() => {
     const text = readFileSafe(filePath);
     if (text === null) fail('missing ' + filePath);
     const parsed = parseEntries(text);
     const clean = splitLines(sanitize(bodyLines.join('\n')));
-    const freshLines = ['## ' + title, '- date: ' + todayDate(), '- status: accepted', '- confidence: ' + (confidence || 'med')];
+    const st = /^(?:proposed|accepted|superseded|deprecated)$/.test(status || '') ? status : 'accepted';
+    const freshLines = ['## ' + title, '- date: ' + todayDate(), '- status: ' + st, '- confidence: ' + (confidence || 'med')];
     let supersededTitle = null;
     for (const e of parsed.entries) {
       if (entryStatus(e) === 'superseded') continue;
@@ -1713,6 +1714,19 @@ function cmdPrecommit(strict) {
   }
   console.log('coderecall pre-commit: AGENTS.md digest refreshed.');
   if (overBudget.length) console.log('  note: over ~' + LEDGER_WARN_BYTES + 'B (run: node coderecall.js consolidate): ' + overBudget.join(', '));
+  // Capture nudge (advisory, never blocks): committing real source changes with
+  // no decision recorded? The commit is the deliberate checkpoint to ask
+  // "did you record WHY?" — the on-brand, non-coercive capture prompt (not a
+  // Stop-hook). Conservative heuristic: skip docs/config/ledger-only commits.
+  try {
+    const staged = (gitOut(['diff', '--cached', '--name-only']) || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    const isSource = (f) => f.indexOf('.ai/memory/') !== 0 && !/^(AGENTS\.md|CLAUDE\.md)$/.test(f) && !/^(README|docs\/|LICENSE|CHANGELOG|ROADMAP|SPEC|COMPATIBILITY)/i.test(f) && !/\.(md|txt|json|ya?ml|lock|toml|ini|cfg)$/i.test(f) && !/(^|\/)\.gitignore$/.test(f);
+    const src = staged.filter(isSource);
+    const decisionStaged = staged.some((f) => /\.ai\/memory\/(DECISIONS|LESSONS)\.md$/.test(f));
+    if (src.length && !decisionStaged) {
+      console.log('  note: ' + src.length + ' source file(s) staged, no decision recorded — `coderecall decision "…"` if this commit was a choice worth keeping.');
+    }
+  } catch (e) { /* best effort — never break the commit */ }
   if (issues.length === 0) {
     console.log('  lint: clean.');
     return;
@@ -1912,6 +1926,10 @@ function cmdSelftest() {
     } catch (e) { emptyObj = {}; }
     check('score floors an empty template (< 15)', typeof emptyObj.overall === 'number' && emptyObj.overall < 15);
     rmrf(freshDir);
+    // decision CLI: records an ADR-grade entry from the terminal (reliable capture).
+    run(['decision', 'Selftest decision', '--context', 'c', '--decision', 'd', '--consequences', 'q']);
+    const decText = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+    check('decision CLI writes an ADR entry', /## Selftest decision/.test(decText) && /- status: accepted/.test(decText) && /\*\*Decision:\*\* d/.test(decText));
     fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore
   } catch (e) {
     check('selftest ran without throwing', false);
@@ -1929,6 +1947,30 @@ function cmdSelftest() {
 
 // ---------------------------------------------------------------------------
 // graduate — long-lived knowledge → project ai_wiki + optional global lessons
+// ---------------------------------------------------------------------------
+// decision — record an ADR-grade decision from the terminal (friction-reducer
+// for reliable capture; mirrors the MCP write_decision tool). One-liner so a
+// human or a script can persist a decision without an MCP client.
+// ---------------------------------------------------------------------------
+function cmdDecision(args) {
+  requireLedger();
+  const opts = {};
+  const positional = [];
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (a.indexOf('--') === 0) { opts[a.slice(2)] = args[i + 1]; i++; }
+    else positional.push(a);
+  }
+  const title = positional.join(' ').trim();
+  const usage = 'usage: node coderecall.js decision "<title>" [--context .. --decision .. --consequences ..] [--status proposed|accepted|deprecated] [--confidence high|med|low]  (or --body "..")';
+  if (!title) fail(usage);
+  const body = composeAdrBody({ body: opts.body, context: opts.context, decision: opts.decision, consequences: opts.consequences });
+  if (!body) fail('provide --body, or at least one of --context / --decision / --consequences\n' + usage);
+  const status = /^(?:proposed|accepted|deprecated)$/.test(opts.status || '') ? opts.status : 'accepted';
+  const res = upsertEntry(DECISIONS_FILE, title, splitLines(body), opts.confidence, status);
+  console.log('DECISIONS.md: ' + res + ' — "' + title + '" [' + status + ']');
+}
+
 // ---------------------------------------------------------------------------
 /**
  * Export DECISIONS/LESSONS entries older than GRADUATE_AGE_DAYS with confidence
@@ -1993,7 +2035,7 @@ function mcpToolDefs() {
     { name: 'update_task', description: 'Update TASK.md GOAL/NOW/NEXT. Provide any subset.',
       inputSchema: { type: 'object', properties: { goal: { type: 'string' }, now: { type: 'string' }, next: { type: 'string' } }, additionalProperties: false } },
     { name: 'write_decision', description: 'Record an ADR-grade decision (DECISIONS.md): why + what + consequences. Supersedes an overlapping prior decision. Provide either `body`, or the structured `context`/`decision`/`consequences`.',
-      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, confidence: conf }, required: ['title'], additionalProperties: false } },
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, status: { type: 'string', enum: ['proposed', 'accepted', 'deprecated'] }, confidence: conf }, required: ['title'], additionalProperties: false } },
     { name: 'write_lesson', description: 'Record a lesson / failure + root cause (LESSONS.md).',
       inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
     { name: 'search_memory', description: 'BM25 lexical search across the ledger + archive.',
@@ -2033,7 +2075,7 @@ function mcpCallTool(name, args) {
       if (!args.title) throw new Error('title is required');
       const body = composeAdrBody(args);
       if (!body) throw new Error('provide `body`, or at least one of context/decision/consequences');
-      return 'DECISIONS.md: ' + upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence);
+      return 'DECISIONS.md: ' + upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status);
     }
     case 'write_lesson':
       if (!args.title || !args.body) throw new Error('title and body are required');
@@ -2118,7 +2160,7 @@ function cmdMcp() {
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
-  const usage = 'usage: node coderecall.js <init|sync [--all]|status|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|mcp|score [--json]|selftest|version>';
+  const usage = 'usage: node coderecall.js <init|sync [--all]|status|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decision "<title>" [--context/--decision/--consequences/--status/--confidence]|mcp|score [--json]|selftest|version>';
   switch (cmd) {
     case 'init': return cmdInit();
     case 'sync': return cmdSync(args.includes('--all'));
@@ -2133,6 +2175,7 @@ function main() {
     case 'install-githook': return cmdInstallGitHook(args.includes('--strict'));
     case 'remove-githook': return cmdRemoveGitHook();
     case 'graduate': return cmdGraduate(args.includes('--global'));
+    case 'decision': return cmdDecision(args);
     case 'mcp': return cmdMcp();
     case 'score': return cmdScore(args.includes('--json'));
     case 'selftest': return cmdSelftest();

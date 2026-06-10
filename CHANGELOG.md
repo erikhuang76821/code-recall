@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.4 (2026-06-10)
+
+**Reliable capture** — the answer to the decision-log's #1 risk (honor-system write-back). Two non-coercive levers, both consistent with the earlier decision *not* to use Stop-hook prompts:
+
+1. **`coderecall decision "<title>"` CLI** — record an ADR-grade decision from the terminal in one line (`--context`/`--decision`/`--consequences`/`--status`/`--confidence`, or `--body`). Mirrors the MCP `write_decision` tool and is supersede-aware. Lowers the friction of capturing a decision so it actually happens.
+2. **Pre-commit capture nudge** — `precommit` prints one advisory line when a commit stages real source files but records no decision ("N source file(s) staged, no decision recorded — `coderecall decision …`"). At the deliberate commit checkpoint, never blocks, never via a Stop hook. Conservative heuristic (skips docs/config/ledger-only commits).
+
+`score` was deliberately left unchanged — it measures working-state health and shouldn't penalize an early task for having no decisions yet. selftest now 16/16.
+
 ## v2.3 (2026-06-10)
 
 **North star set:** Code Recall is the **Decision Persistence Layer** — it preserves *why you built it this way* and *what didn't work*, AI-maintained, local, surviving compaction. It is the foundation of the Decision Lifecycle, deliberately **not** a governance/approval/compliance platform (that needs identity/servers/multi-user — a different product). Scope fences are documented at the top of [ROADMAP.md](ROADMAP.md).
