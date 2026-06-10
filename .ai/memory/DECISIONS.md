@@ -80,5 +80,5 @@ UserPromptSubmit reminder is opt-in (installers don't register it) because token
 - status: accepted
 - confidence: high
 **Context:** decision log's value depends on write-back actually happening (honor-system risk)
-**Decision:** add a one-line  CLI + a pre-commit advisory nudge; leave score undistorted
+**Decision:** add a one-line `decision` CLI + a pre-commit advisory nudge; leave score undistorted
 **Consequences:** non-coercive, on-brand; capture is easier + prompted at the commit checkpoint, never blocks
