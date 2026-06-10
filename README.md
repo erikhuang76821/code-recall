@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner.png" alt="Code Recall — Decision Persistence Layer for AI Coding" width="100%">
+  <img src="[docs/assets/banner.png](https://chatgpt.com/backend-api/estuary/content?id=file_000000001bac720b82920e0d12e9080d&ts=494749&p=fs&cid=1&sig=c31b5024f4ad170c5f808353761fd4096a2a4cce5f28deb880dd6c7f40e70538&v=0)" alt="Code Recall — Decision Persistence Layer for AI Coding" width="100%">
 </p>
 
 # 🌟 Code Recall — your coding agent's decision log / 你的 coding agent 的決策日誌
@@ -198,7 +198,7 @@ Code Recall 監聽 AI 工具的生命週期 (Lifecycle Hooks)，自動存取記�
 ---
 
 <p align="center">
-  <img src="docs/assets/overview.png" alt="Code Recall — capture decisions, stay persistent, avoid re-litigation, episodic memory, local & zero-dependency" width="100%">
+  <img src="[docs/assets/overview.png](https://chatgpt.com/backend-api/estuary/content?id=file_00000000f934720b892fac4dd86dd678&ts=494749&p=fs&cid=1&sig=9b81940af1c3da5aac2bc43a3f57c52d30202c8970bdde143965ddcc5680e63d&v=0)" alt="Code Recall — capture decisions, stay persistent, avoid re-litigation, episodic memory, local & zero-dependency" width="100%">
 </p>
 
 ## 📊 市場稀缺性 / Market scarcity — who treats *decision persistence* as the core?
