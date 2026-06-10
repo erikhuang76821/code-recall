@@ -1,8 +1,11 @@
-# Memo-star ⭐
+# Memo-star ⭐ (v1.2.0)
 
 > AI coding agent 的零摩擦持久記憶層 — 撐得過 context compaction、跨所有 IDE/CLI、不需要 daemon、向量資料庫或 API key。
 >
 > Zero-friction persistent memory layer for AI coding agents — survives context compaction, works across every IDE/CLI, no daemon, no vector DB, no API keys.
+
+需求 Requirements: Node >= 10.12（任何 2018 年後的 Node 即可；建議 Node 18+）。
+Requires Node >= 10.12 (any 2018+ Node; Node 18+ recommended).
 
 ## 快速開始 Quickstart
 
@@ -71,11 +74,14 @@ Other tools: run `node memo.js sync --all` to generate per-tool instruction stub
 
 | | Memo-star | claude-mem | MemPalace | mem0 | 內建 IDE 記憶 Built-in IDE memories |
 |---|---|---|---|---|---|
-| 自動擷取 Auto-capture | ✅ hooks，零手動 | ✅ hooks | ⚠️ 需手動指令 manual commands | ⚠️ 需程式整合 SDK integration | ⚠️ 不定期、不可控 opportunistic |
-| Compaction 存活 Compaction survival | ✅ PreCompact 快照 + 重注入 re-inject | ⚠️ 部分 partial | ❌ | ❌ 與 context 無關 context-unaware | ❌ |
-| 跨工具 Cross-tool | ✅ AGENTS.md + 各工具 stub | ❌ 僅 Claude Code | ❌ 僅 Claude Code | ⚠️ 需各自整合 per-app | ❌ 鎖在單一工具 single tool |
+| 自動擷取 Auto-capture | ✅ hooks，零手動 | ✅ hooks | ✅ hooks（逐字 verbatim） | ⚠️ 需程式整合 SDK integration | ⚠️ 不定期、不可控 opportunistic |
+| Compaction 存活 Compaction survival* | ✅ Claude Code / 🟡 其他 others（見 see COMPATIBILITY.md） | ⚠️ 部分 partial | 🟡 部分 partial（有快照、無重錨定注入 snapshot, no re-anchor injection） | ❌ 與 context 無關 context-unaware | ❌ |
+| 跨工具 Cross-tool | ✅ AGENTS.md + 各工具 stub | ❌ 僅 Claude Code | 🟡 部分 partial（MCP clients） | ⚠️ 需各自整合 per-app | ❌ 鎖在單一工具 single tool |
+| 跨月語意召回 Semantic recall over months | ❌ 無（v1.3 規劃詞法搜尋 lexical search planned v1.3） | ⚠️ | ✅ | ✅ 向量檢索 vector recall | ❌ |
 | 免 daemon No daemon | ✅ 純檔案 plain files | ❌ worker + DB | ✅ | ❌ 服務/API service | ✅ |
-| Windows | ✅ 第一優先 first-class | ⚠️ | ⚠️ | ⚠️ | ✅ |
+| Windows | ✅ 第一優先 first-class | ⚠️ | ⚠️ 弱 weak | ⚠️ | ✅ |
+
+\* 逐工具的「注入／寫回／compaction 存活」三層真實等級，見 per-tool injection / write-back / compaction-survival details: [COMPATIBILITY.md](COMPATIBILITY.md)。
 
 ## 疑難排解 Troubleshooting
 

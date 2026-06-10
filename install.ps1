@@ -45,15 +45,37 @@ foreach ($k in @($hookScripts.Keys)) {
     }
 }
 
-# The hook command embeds the path in double quotes and is run through a shell
+# --- Node guard (before any write) ------------------------------------------
+# The hooks are node scripts; without node they die silently inside Claude
+# Code. Abort install when node is missing, and resolve its ABSOLUTE path so
+# hook commands survive GUI-launched Claude Code sessions with a different
+# PATH than this shell.
+$nodePath = $null
+if (-not $Uninstall) {
+    $nodeCmd = $null
+    try { $nodeCmd = Get-Command node -ErrorAction Stop } catch { $nodeCmd = $null }
+    if ($null -eq $nodeCmd) {
+        Write-Host "[memo-star] ABORT: Node.js is required but 'node' was not found on PATH." -ForegroundColor Red
+        Write-Host "  The memo-star hooks are Node scripts and cannot run without it." -ForegroundColor Red
+        Write-Host "  Install Node.js from https://nodejs.org and re-run this installer." -ForegroundColor Red
+        exit 1
+    }
+    $nodePath = $nodeCmd.Source
+    if (-not $nodePath) { $nodePath = $nodeCmd.Path }
+    Write-Host "[memo-star] Using node: $nodePath"
+}
+
+# The hook command embeds the paths in double quotes and is run through a shell
 # (cmd.exe on Windows treats % & ^ ! < > | as metacharacters; a double quote is
 # illegal in Windows paths anyway). Refuse to install from an unsafe path.
 if (-not $Uninstall) {
-    if ($hooksDir -match '["%&^!<>|`$]' -or $hooksDir -match "`r|`n") {
-        Write-Host "[memo-star] ABORT: the hooks path contains shell-unsafe characters:" -ForegroundColor Red
-        Write-Host "  $hooksDir" -ForegroundColor Red
-        Write-Host '  Move the memo-star checkout to a path without " % & ^ ! < > | ` $ or newlines and re-run.' -ForegroundColor Red
-        exit 1
+    foreach ($unsafeCandidate in @($hooksDir, $nodePath)) {
+        if ($unsafeCandidate -match '["%&^!<>|`$]' -or $unsafeCandidate -match "`r|`n") {
+            Write-Host "[memo-star] ABORT: a path used in hook commands contains shell-unsafe characters:" -ForegroundColor Red
+            Write-Host "  $unsafeCandidate" -ForegroundColor Red
+            Write-Host '  Use a path without " % & ^ ! < > | ` $ or newlines and re-run.' -ForegroundColor Red
+            exit 1
+        }
     }
 }
 
@@ -110,7 +132,8 @@ if ($null -eq $settings) { $settings = New-Object PSObject }
 
 # --- Backup ----------------------------------------------------------------
 if ($fileExisted) {
-    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    # Millisecond suffix: rapid repeated runs must not overwrite one backup.
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
     $backupPath = "$SettingsPath.memo-star.bak.$stamp"
     Copy-Item -LiteralPath $SettingsPath -Destination $backupPath -Force
     Write-Host "[memo-star] Backup written: $backupPath"
@@ -184,12 +207,16 @@ if ($Uninstall) {
             continue
         }
 
+        # Absolute quoted node path (not bare `node`): GUI-launched Claude Code
+        # may run hooks with a PATH that lacks node. Idempotency detection
+        # (Test-IsMemoStarEntry) matches on the hooks dir path, so it accepts
+        # BOTH old-format (node "...") and new-format ("...node.exe" "...") entries.
         $newEntry = [pscustomobject]@{
             matcher = $matchers[$eventName]
             hooks   = @(
                 [pscustomobject]@{
                     type    = 'command'
-                    command = ('node "{0}"' -f $hookScripts[$eventName])
+                    command = ('"{0}" "{1}"' -f $nodePath, $hookScripts[$eventName])
                 }
             )
         }
@@ -207,6 +234,24 @@ $json = ConvertTo-Json -InputObject $settings -Depth 32
 # UTF-8 without BOM so every JSON consumer can read it.
 [System.IO.File]::WriteAllText($SettingsPath, $json, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "[memo-star] Updated $SettingsPath"
+
+# --- Prune old backups (keep the newest 5) ----------------------------------
+$bakKeep = 5
+if ($settingsDir -and (Test-Path -LiteralPath $settingsDir)) {
+    $bakFilter = (Split-Path -Leaf $SettingsPath) + '.memo-star.bak.*'
+    $bakFiles = @(Get-ChildItem -Path $settingsDir -Filter $bakFilter -File -ErrorAction SilentlyContinue |
+        Sort-Object -Property @{Expression = 'LastWriteTime'; Descending = $true}, @{Expression = 'Name'; Descending = $true})
+    if ($bakFiles.Count -gt $bakKeep) {
+        foreach ($oldBak in ($bakFiles | Select-Object -Skip $bakKeep)) {
+            try {
+                Remove-Item -LiteralPath $oldBak.FullName -Force -Confirm:$false -ErrorAction Stop
+                Write-Host "  [prune] old backup removed: $($oldBak.Name)"
+            } catch {
+                # best effort — never fail the install over backup hygiene
+            }
+        }
+    }
+}
 if (-not $Uninstall) {
     Write-Host "[memo-star] Done. Hooks are global; per-project memory activates only where .ai/memory/ exists (run 'node memo.js init')."
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * memo.js — Memo-star single-file zero-dependency CLI.
+ * memo.js — Memo-star single-file zero-dependency CLI. Version 1.2.0.
  * Commands: init | sync [--all] | status | doctor | digest | snapshot | consolidate
  * Windows-first: path.join everywhere, CRLF-tolerant parsing, no symlinks.
  * Templates are read relative to __dirname so the repo can live anywhere.
@@ -127,12 +127,19 @@ function writeFileAtomic(file, content) {
 
 /** Synchronous sleep without busy-spinning (Atomics.wait is allowed on Node's main thread). */
 function sleepMs(ms) {
-  try {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-  } catch (e) {
-    const end = Date.now() + ms;
-    while (Date.now() < end) { /* fallback busy wait */ }
+  // Some embedders / hardened runtimes ship without SharedArrayBuffer (or
+  // with Atomics.wait disabled). Guard explicitly and fall back to a
+  // Date.now() busy-wait — acceptable here because lock waits are short
+  // (50ms) and rare. Behavior is identical when SAB is available.
+  if (typeof SharedArrayBuffer !== 'undefined' &&
+      typeof Atomics !== 'undefined' && typeof Atomics.wait === 'function') {
+    try {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      return;
+    } catch (e) { /* fall through to busy wait */ }
   }
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* busy wait fallback (short 50ms waits only) */ }
 }
 
 // Re-entrant within one process: nested acquireLock() calls just bump a depth
@@ -417,6 +424,24 @@ function neutralizeLedger(text) {
   return splitLines(text).filter((line) => !/MEMO-STAR:UNTRUSTED/i.test(line)).join('\n');
 }
 
+/** Newest precompact-*.md snapshot filename in archive/ by mtime, or null. */
+function newestSnapshotName() {
+  let names;
+  try { names = fs.readdirSync(ARCHIVE_DIR); } catch (e) { return null; }
+  let best = null;
+  let bestMtime = -1;
+  for (const n of names) {
+    if (!/^precompact-.*\.md$/.test(n)) continue;
+    let mtime = 0;
+    try { mtime = fs.statSync(path.join(ARCHIVE_DIR, n)).mtimeMs; } catch (e) { continue; }
+    if (mtime > bestMtime || (mtime === bestMtime && (best === null || n > best))) {
+      bestMtime = mtime;
+      best = n;
+    }
+  }
+  return best;
+}
+
 function buildDigest(opts) {
   opts = opts || {};
   const taskText = readFileSafe(TASK_FILE);
@@ -447,8 +472,26 @@ function buildDigest(opts) {
     lines.push(body);
   }
   lines.push(LEDGER_FENCE_END);
+  if (opts.compact) {
+    // Point the agent at the freshest pre-compaction snapshot (filename is
+    // memo-star-generated, so it lives outside the untrusted fence).
+    const snap = newestSnapshotName();
+    if (snap) lines.push('Latest pre-compaction snapshot: .ai/memory/archive/' + snap);
+  }
   lines.push('Open items: ' + t.counts.todo + ' todo, ' + t.counts.doing + ' doing, ' + t.counts.blocked +
     ' blocked. Lessons on file: ' + lessonsCount + '.');
+  // Blocked items carry their reason — the agent must know WHY work is stuck.
+  // Their text is ledger-derived (untrusted), so it goes through the sanitizer
+  // and inside the same untrusted-data fence markers. Absent on a fresh ledger,
+  // so the fresh-from-template digest budget is unaffected.
+  const blockedLines = t.lines.filter((l) => /^\s*- \[!\]/.test(l));
+  if (blockedLines.length > 0) {
+    lines.push(LEDGER_FENCE_BEGIN);
+    for (const b of blockedLines) {
+      lines.push(neutralizeLedger(sanitize('Blocked: ' + b.trim())));
+    }
+    lines.push(LEDGER_FENCE_END);
+  }
   // Stale trigger (exact contract): heartbeat STALE flag OR UPDATED age > 2h.
   const age = taskAgeHours(t);
   if (heartbeatStale() || (age !== null && age > STALE_HOURS)) {
@@ -564,7 +607,12 @@ const STUBS = [
     rel: path.join('.cursor', 'rules', 'memo-star.mdc'),
     content: '---\ndescription: memo-star memory protocol\nalwaysApply: true\n---\n' + STUB_BODY,
   },
-  { rel: path.join('.windsurf', 'rules', 'memo-star.md'), content: STUB_BODY },
+  {
+    // Windsurf requires frontmatter with trigger: always_on for the rule to be
+    // applied on every request (total file must stay well under 12,000 chars).
+    rel: path.join('.windsurf', 'rules', 'memo-star.md'),
+    content: '---\ntrigger: always_on\ndescription: memo-star memory protocol\n---\n' + STUB_BODY,
+  },
   { rel: path.join('.clinerules', 'memo-star.md'), content: STUB_BODY },
   { rel: path.join('.roo', 'rules', 'memo-star.md'), content: STUB_BODY },
   { rel: 'GEMINI.md', content: STUB_BODY, shared: true },
@@ -759,9 +807,12 @@ function cmdDoctor() {
   else warn('AGENTS.md marker section: ' + drift + ' — run: node memo.js sync');
 
   // 3. Hooks in ~/.claude/settings.json
+  // (path overridable via MEMO_STAR_SETTINGS for testing; default unchanged)
   console.log('[hooks]');
-  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+  const settingsPath = process.env.MEMO_STAR_SETTINGS ||
+    path.join(os.homedir(), '.claude', 'settings.json');
   const settingsText = readFileSafe(settingsPath);
+  let sessionStartCmd = null;
   if (settingsText === null) {
     warn('~/.claude/settings.json not found — run install.ps1 to register hooks');
   } else {
@@ -779,10 +830,60 @@ function cmdDoctor() {
       // win32 paths are case-insensitive; on POSIX this is merely lenient.
       const hooksDirNeedle = JSON.stringify(path.join(__dirname, 'hooks')).slice(1, -1).toLowerCase();
       for (const event of ['SessionStart', 'PreCompact', 'Stop']) {
-        const entries = JSON.stringify(hooks[event] || []).toLowerCase();
-        if (entries.includes('memo-star') || entries.includes(hooksDirNeedle)) ok(event + ' hook registered');
+        const list = Array.isArray(hooks[event]) ? hooks[event] : [];
+        let registered = false;
+        for (const entry of list) {
+          let es = '';
+          try { es = JSON.stringify(entry || {}).toLowerCase(); } catch (e) { es = ''; }
+          if (es.includes('memo-star') || es.includes(hooksDirNeedle)) {
+            registered = true;
+            if (event === 'SessionStart' && sessionStartCmd === null &&
+                entry && Array.isArray(entry.hooks)) {
+              for (const h of entry.hooks) {
+                if (h && typeof h.command === 'string' && h.command) {
+                  sessionStartCmd = h.command;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        if (registered) ok(event + ' hook registered');
         else warn(event + ' hook not registered — run install.ps1');
       }
+    }
+  }
+
+  // 4. Hook execution (end-to-end): actually run the registered SessionStart
+  // command through a shell (cmd on Windows, sh on POSIX — execSync default)
+  // with synthetic hook stdin pointing at a temp cwd WITHOUT .ai/memory, so a
+  // healthy hook exits 0 instantly. Catches dead node paths, moved repos, etc.
+  console.log('[hook execution]');
+  if (sessionStartCmd === null) {
+    console.log('  info hook execution check skipped (no memo-star SessionStart hook registered)');
+  } else {
+    const cp = require('child_process');
+    let tmpDir = null;
+    try {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'memo-star-doctor-'));
+      const stdinJson = JSON.stringify({
+        hook_event_name: 'SessionStart',
+        source: 'startup',
+        cwd: tmpDir,
+      });
+      cp.execSync(sessionStartCmd, {
+        input: stdinJson,
+        timeout: 5000,
+        cwd: tmpDir,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      ok('SessionStart hook command executed successfully (exit 0)');
+    } catch (e) {
+      const detail = e && e.stderr ? String(e.stderr).trim() : '';
+      warn('SessionStart hook command FAILED: ' + (e && e.message ? e.message : String(e)) +
+        (detail ? ' — ' + detail.slice(0, 200) : ''));
+    } finally {
+      if (tmpDir) { try { fs.rmdirSync(tmpDir); } catch (e2) { /* best effort */ } }
     }
   }
 
