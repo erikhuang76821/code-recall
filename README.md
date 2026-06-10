@@ -113,7 +113,7 @@ Memo-star 監聽 AI 工具的生命週期 (Lifecycle Hooks)，自動存取記憶
 4. **拉取式召回** — 需要時用 `memo search`（BM25）或 MCP 工具**按需**取記憶，不常駐占 context。
 
 ```
-                         ┌──────────────────────────────┐
+                         ┌───────────────────────────────┐
                          │      <project>/.ai/memory/    │
                          │  TASK.md      (GOAL/NOW/NEXT) │
                          │  DECISIONS.md (dated entries) │
@@ -192,7 +192,7 @@ node memo.js selftest        # 或 doctor --selftest / npm test
 ```
 在臨時專案模擬 compaction，並**驅動真正的 hook 腳本**（sessionstart / precompact），斷言重錨定 digest 含全量 TASK body 與快照生成（11 項檢查）。GitHub Actions 在 **Linux + Windows × Node 18/20** 每次 push/PR 跑它——把核心宣稱變成可重現的回歸測試。
 
-### 🧹 時序 / 取代 / 過期（v2.0，借鏡 supermemory，零依賴）
+### 🧹 時序 / 取代 / 過期（v2.0 零依賴）
 
 DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈：寫入標題重疊的決策時，舊條目被**程式碼**標 `status: superseded` 並保留（看得到演化），不是靜默覆蓋。`consolidate` 把 superseded + 過期條目退役到 `archive/retired-YYYY-MM.md`。鏈結由程式碼維護（非 AI 手寫），不承載遍歷邏輯，故無孤兒/死循環風險。
 
