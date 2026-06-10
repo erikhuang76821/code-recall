@@ -22,6 +22,11 @@ sync --all merges (never overwrites) into .gemini/settings.json (contextFileName
 - confidence: high
 Implemented install-githook/precommit/remove-githook in memo.js (node writes the .git/hooks/pre-commit file) instead of duplicating shell logic in install.ps1 + install.sh. One cross-platform code path, testable, and Git for Windows runs the sh hook fine. Re-stage uses `git ls-files --cached --error-unmatch` (tracked?), NOT `git diff --cached` (which misses a freshly-refreshed file).
 
+## Pre-commit hook is advisory by default; --strict bakes in blocking; no ANSI
+- date: 2026-06-10
+- confidence: high
+`install-githook` default warns-but-allows (refresh is the value; blocking a code commit over a missing confidence line is high-friction and trains --no-verify). `install-githook --strict` writes `precommit --strict` into the hook to block. Lint banner uses plain text, NOT ANSI colour — a git hook's stdout is not reliably a TTY and colour garbles on Windows cmd. Settled a v1.3.x debate with the external reviewer.
+
 ## Staleness reminder hook ships OFF by default
 - date: 2026-06-10
 - confidence: high

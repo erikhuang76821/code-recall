@@ -1,7 +1,7 @@
 # TASK
 GOAL: Ship Memo-star v1.3 — lexical search + cross-tool deepening + observability + optional git pre-commit hook
-NOW: v1.3 complete incl. git pre-commit integration; all features verified end-to-end; publishing to GitHub
-NEXT: commit v1.3 on a branch, push, open PR to master on erikhuang76821/Memo-star
+NOW: v1.3 + git-hook --strict flag and prominent advisory banner added; both modes verified; updating PR #2
+NEXT: merge PR #2 into master once reviewed (awaiting user go-ahead)
 UPDATED: 2026-06-10T18:10:00+08:00
 
 ## Checklist
@@ -15,4 +15,5 @@ UPDATED: 2026-06-10T18:10:00+08:00
 - [x] v1.3.10 — observability: doctor [lint] section + stop.js bounded sessions.md timeline
 - [x] v1.3.11 — optional git pre-commit hook (install-githook/precommit/remove-githook; cross-platform; --strict)
 - [x] Docs (CHANGELOG/SPEC/COMPATIBILITY/README/ROADMAP) + version 1.3.0
-- [>] Publish to GitHub (branch + push + PR)
+- [x] Publish to GitHub — branch v1.3 pushed, PR #2 opened
+- [ ] Merge PR #2 into master (awaiting user go-ahead)
