@@ -198,7 +198,7 @@ Code Recall 監聽 AI 工具的生命週期 (Lifecycle Hooks)，自動存取記�
 ---
 
 <p align="center">
-  <img src="[docs/assets/overview.png](https://chatgpt.com/backend-api/estuary/content?id=file_00000000f934720b892fac4dd86dd678&ts=494749&p=fs&cid=1&sig=9b81940af1c3da5aac2bc43a3f57c52d30202c8970bdde143965ddcc5680e63d&v=0)" alt="Code Recall — capture decisions, stay persistent, avoid re-litigation, episodic memory, local & zero-dependency" width="100%">
+  <img src="https://github.com/erikhuang76821/code-recall/blob/master/docs/assets/2.png?raw=true" alt="Code Recall — capture decisions, stay persistent, avoid re-litigation, episodic memory, local & zero-dependency" width="100%">
 </p>
 
 ## 📊 市場稀缺性 / Market scarcity — who treats *decision persistence* as the core?
