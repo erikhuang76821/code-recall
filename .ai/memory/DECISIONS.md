@@ -82,3 +82,11 @@ UserPromptSubmit reminder is opt-in (installers don't register it) because token
 **Context:** decision log's value depends on write-back actually happening (honor-system risk)
 **Decision:** add a one-line `decision` CLI + a pre-commit advisory nudge; leave score undistorted
 **Consequences:** non-coercive, on-brand; capture is easier + prompted at the commit checkpoint, never blocks
+
+## Lifecycle-aware retrieval: search current truth by default, weight by status
+- date: 2026-06-10
+- status: accepted
+- confidence: high
+**Context:** search ignored status/confidence/recency, so superseded decisions surfaced equally (influence rot)
+**Decision:** default search excludes superseded/deprecated/archive; --history opts in; rank = BM25 x status x confidence x recency; add decisions HEAD view + explicit --supersedes
+**Consequences:** treats decisions like Git HEAD not vectors; stays local/zero-dep (influence governance, not approval); pruning already done

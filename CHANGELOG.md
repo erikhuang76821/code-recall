@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.5 (2026-06-10)
+
+**Influence governance** — the deepest gap for any long-term memory tool isn't *forgetting*, it's *wrongly remembering*: superseded/stale decisions keep getting recalled and pollute context ("influence rot"). Code Recall already had the lifecycle *model* (status) but ignored it at retrieval; this release makes it decisive. Treats decisions like **Git (what's HEAD)**, not a vector store (what's most similar).
+
+1. **Lifecycle-aware retrieval (P1).** `search` and MCP `search_memory` now default to **current truth** — superseded/deprecated/expired entries and the `archive/` are excluded; `--history` (or `history:true`) includes them, labeled `[superseded]`/`[deprecated]`/`[archived]`. New `decisions [--all]` command + MCP `list_decisions` tool = the HEAD view of current decisions.
+2. **Explicit supersede (P2).** `decision "<new>" --supersedes "<old title/substring>"` (and MCP `write_decision { supersedes }`) retires a prior decision by substring match — independent of title similarity, fixing the brittle >0.8-Jaccard auto-match for reworded titles.
+3. **Weighted ranking (P3).** Retrieval score = BM25 × statusWeight (accepted 1.0 / proposed 0.5 / deprecated 0.2 / superseded 0.05) × confidence × recency. On an equal term match, current/high-confidence/recent decisions outrank stale ones.
+
+Priority order followed the analysis: **Lifecycle → Weighting → Pruning** (pruning via `consolidate`/`expires` already shipped). selftest now 20/20 (added explicit-supersede + current-vs-history retrieval checks). 2.5.0.
+
 ## v2.4 (2026-06-10)
 
 **Reliable capture** — the answer to the decision-log's #1 risk (honor-system write-back). Two non-coercive levers, both consistent with the earlier decision *not* to use Stop-hook prompts:

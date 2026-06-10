@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.4.0.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.5.0.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -48,7 +48,7 @@ const CODEX_AGENTS_WARN_BYTES = 32768; // Codex CLI reads ~32KiB of AGENTS.md; w
 const GRADUATE_AGE_DAYS = 90;          // entries older than this + high confidence may graduate
 const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the digest (opt-in)
 
-const VERSION = '2.4.0';
+const VERSION = '2.5.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -433,7 +433,7 @@ function serializeEntries(parsed) {
  * fresh entry records `supersedes: <old>`. `consolidate` later retires superseded
  * (and expired) entries to archive. Returns 'appended' or 'superseded'.
  */
-function upsertEntry(filePath, title, bodyLines, confidence, status) {
+function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMatch) {
   return withLock(() => {
     const text = readFileSafe(filePath);
     if (text === null) fail('missing ' + filePath);
@@ -441,10 +441,19 @@ function upsertEntry(filePath, title, bodyLines, confidence, status) {
     const clean = splitLines(sanitize(bodyLines.join('\n')));
     const st = /^(?:proposed|accepted|superseded|deprecated)$/.test(status || '') ? status : 'accepted';
     const freshLines = ['## ' + title, '- date: ' + todayDate(), '- status: ' + st, '- confidence: ' + (confidence || 'med')];
+    // P2 — explicit supersede: when supersedeMatch is given, retire the active
+    // entry whose TITLE CONTAINS it (case-insensitive), regardless of title
+    // overlap (fixes the brittle >0.8-Jaccard auto-match for reworded titles).
+    // Otherwise fall back to automatic title-overlap supersede.
+    const matchLc = (supersedeMatch || '').trim().toLowerCase();
     let supersededTitle = null;
     for (const e of parsed.entries) {
-      if (entryStatus(e) === 'superseded') continue;
-      if (titleOverlap(e.title, title) > TITLE_OVERLAP_THRESHOLD) {
+      const est = entryStatus(e);
+      if (est === 'superseded' || est === 'deprecated') continue;
+      const hit = matchLc
+        ? e.title.toLowerCase().indexOf(matchLc) !== -1
+        : titleOverlap(e.title, title) > TITLE_OVERLAP_THRESHOLD;
+      if (hit) {
         setEntryField(e, 'status', 'superseded');
         setEntryField(e, 'superseded-by', title);
         supersededTitle = e.title;
@@ -1316,33 +1325,72 @@ function paragraphs(text) {
  * - DECISIONS/LESSONS  → one chunk per "## entry" (label = title)
  * - archive/*.md       → paragraph blocks (label = filename)
  */
-function collectChunks() {
+// Retrieval weighting (P3): an entry's influence = relevance × lifecycle.
+function statusWeight(s) {
+  const w = { accepted: 1, active: 1, proposed: 0.5, deprecated: 0.2, superseded: 0.05 };
+  return (s && w[s] !== undefined) ? w[s] : 1;
+}
+function confidenceWeight(c) {
+  const w = { high: 1, med: 0.7, low: 0.4 };
+  return (c && w[c] !== undefined) ? w[c] : 0.7;
+}
+/** Gentle recency decay: 1.0 within 90d, easing to 0.6 by a year, floor 0.6. */
+function recencyWeight(date) {
+  if (!date) return 1;
+  const age = (Date.parse(todayDate()) - Date.parse(date)) / 86400000;
+  if (isNaN(age) || age <= 90) return 1;
+  if (age >= 365) return 0.6;
+  return 1 - ((age - 90) / 275) * 0.4;
+}
+function chunkIsHistory(c) {
+  return c.status === 'superseded' || c.status === 'deprecated' || c.archived || c.expired;
+}
+
+/**
+ * Collect searchable chunks. P1 (lifecycle-aware): by default the corpus is the
+ * CURRENT truth — active DECISIONS/LESSONS + TASK; superseded/deprecated/expired
+ * entries and the archive/ are excluded. opts.includeHistory adds them back
+ * (each flagged so the caller can label/down-rank). Decision/lesson chunks carry
+ * { status, confidence, date } so bm25Search can weight by lifecycle.
+ */
+function collectChunks(opts) {
+  opts = opts || {};
+  const includeHistory = !!opts.includeHistory;
   const chunks = [];
   const taskText = readFileSafe(TASK_FILE);
   if (taskText !== null) {
-    for (const p of paragraphs(taskText)) chunks.push({ source: 'TASK.md', label: '', text: p });
+    for (const p of paragraphs(taskText)) chunks.push({ source: 'TASK.md', label: '', text: p, status: 'accepted', confidence: 'high', date: null });
   }
   for (const [label, p] of [['DECISIONS.md', DECISIONS_FILE], ['LESSONS.md', LESSONS_FILE]]) {
     const text = readFileSafe(p);
     if (text === null) continue;
     for (const e of parseEntries(text).entries) {
-      chunks.push({ source: label, label: e.title, text: e.lines.join('\n') });
+      const status = entryStatus(e);
+      const expired = entryExpired(e);
+      const history = status === 'superseded' || status === 'deprecated' || expired;
+      if (history && !includeHistory) continue;
+      chunks.push({ source: label, label: e.title, text: e.lines.join('\n'), status, confidence: entryField(e, 'confidence') || 'med', date: entryDate(e), expired });
     }
   }
-  let archNames = [];
-  try { archNames = fs.readdirSync(ARCHIVE_DIR); } catch (e) { archNames = []; }
-  for (const n of archNames) {
-    if (!/\.md$/.test(n)) continue;
-    const text = readFileSafe(path.join(ARCHIVE_DIR, n));
-    if (text === null) continue;
-    for (const p of paragraphs(text)) {
-      chunks.push({ source: path.join('archive', n), label: '', text: p });
+  if (includeHistory) {
+    let archNames = [];
+    try { archNames = fs.readdirSync(ARCHIVE_DIR); } catch (e) { archNames = []; }
+    for (const n of archNames) {
+      if (!/\.md$/.test(n)) continue;
+      const text = readFileSafe(path.join(ARCHIVE_DIR, n));
+      if (text === null) continue;
+      for (const p of paragraphs(text)) chunks.push({ source: path.join('archive', n), label: '', text: p, status: 'archived', confidence: 'low', date: null, archived: true });
     }
   }
   return chunks;
 }
 
-/** Classic BM25 (k1=1.5, b=0.75) over the chunk corpus. Returns scored desc. */
+/**
+ * BM25 (k1=1.5, b=0.75) × lifecycle weight (P3): final score =
+ * BM25 × statusWeight × confidenceWeight × recencyWeight. So an accepted,
+ * high-confidence, recent decision outranks a superseded/stale one even on an
+ * equal term match — relevance is necessary, current truth is decisive.
+ */
 function bm25Search(query, chunks, limit) {
   const qset = Array.from(new Set(tokenize(query)));
   if (qset.length === 0) return [];
@@ -1358,31 +1406,35 @@ function bm25Search(query, chunks, limit) {
   for (const d of docs) {
     const tf = Object.create(null);
     for (const tok of d.toks) tf[tok] = (tf[tok] || 0) + 1;
-    let score = 0;
+    let base = 0;
     for (const term of qset) {
       const f = tf[term];
       if (!f) continue;
       const idf = Math.log(1 + (N - df[term] + 0.5) / (df[term] + 0.5));
-      score += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * (d.toks.length / avgdl)));
+      base += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * (d.toks.length / avgdl)));
     }
-    if (score > 0) scored.push({ chunk: d.chunk, score });
+    if (base <= 0) continue;
+    const c = d.chunk;
+    const score = base * statusWeight(c.status) * confidenceWeight(c.confidence) * recencyWeight(c.date);
+    scored.push({ chunk: c, score });
   }
   scored.sort((a, b2) => b2.score - a.score);
   return scored.slice(0, limit);
 }
 
-function cmdSearch(query, limit) {
+function cmdSearch(query, limit, includeHistory) {
   requireLedger();
-  if (!query || !query.trim()) fail('usage: node coderecall.js search <query> [--limit N]');
-  const results = bm25Search(query, collectChunks(), limit || SEARCH_LIMIT_DEFAULT);
+  if (!query || !query.trim()) fail('usage: node coderecall.js search <query> [--limit N] [--history] [--history]');
+  const results = bm25Search(query, collectChunks({ includeHistory: includeHistory }), limit || SEARCH_LIMIT_DEFAULT);
   if (results.length === 0) {
-    console.log('No matches for: ' + query);
+    console.log('No matches for: ' + query + (includeHistory ? '' : '  (current truth only — add --history to include superseded/archived)'));
     return;
   }
-  console.log('coderecall search: "' + query + '" — ' + results.length + ' result(s)');
+  console.log('coderecall search: "' + query + '" — ' + results.length + ' result(s)' + (includeHistory ? ' (incl. history)' : ' (current truth)'));
   console.log('');
   for (const r of results) {
-    const head = r.chunk.source + (r.chunk.label ? '  › ' + r.chunk.label : '');
+    const tag = chunkIsHistory(r.chunk) ? '[' + (r.chunk.status === 'archived' ? 'archived' : r.chunk.status) + '] ' : '';
+    const head = tag + r.chunk.source + (r.chunk.label ? '  › ' + r.chunk.label : '');
     console.log(r.score.toFixed(2) + '  ' + head);
     const snippet = r.chunk.text.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 3);
     for (const l of snippet) console.log('      ' + (l.length > 150 ? l.slice(0, 150) + ' …' : l));
@@ -1930,6 +1982,17 @@ function cmdSelftest() {
     run(['decision', 'Selftest decision', '--context', 'c', '--decision', 'd', '--consequences', 'q']);
     const decText = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
     check('decision CLI writes an ADR entry', /## Selftest decision/.test(decText) && /- status: accepted/.test(decText) && /\*\*Decision:\*\* d/.test(decText));
+    // P1/P2/P3: explicit supersede (titles differ) + lifecycle-aware retrieval.
+    run(['decision', 'Use SQLite for local store', '--decision', 'simple']);
+    run(['decision', 'Switch to Postgres for the store', '--decision', 'concurrency', '--supersedes', 'sqlite for local']);
+    const dText = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+    check('explicit --supersedes retires the matched decision (title-independent)', /- superseded-by: Switch to Postgres for the store/.test(dText) && /## Use SQLite for local store[\s\S]*?- status: superseded/.test(dText));
+    const curSearch = run(['search', 'sqlite']);
+    check('search hides superseded by default (current truth)', !/Use SQLite for local store/.test(curSearch));
+    const histSearch = run(['search', 'sqlite', '--history']);
+    check('search --history surfaces superseded, labeled', /Use SQLite for local store/.test(histSearch) && /\[superseded\]/.test(histSearch));
+    const head = run(['decisions']);
+    check('decisions HEAD view excludes superseded', /Switch to Postgres/.test(head) && !/Use SQLite for local store/.test(head));
     fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore
   } catch (e) {
     check('selftest ran without throwing', false);
@@ -1962,13 +2025,35 @@ function cmdDecision(args) {
     else positional.push(a);
   }
   const title = positional.join(' ').trim();
-  const usage = 'usage: node coderecall.js decision "<title>" [--context .. --decision .. --consequences ..] [--status proposed|accepted|deprecated] [--confidence high|med|low]  (or --body "..")';
+  const usage = 'usage: node coderecall.js decision "<title>" [--context .. --decision .. --consequences ..] [--supersedes "<old title/substr>"] [--status proposed|accepted|deprecated] [--confidence high|med|low]  (or --body "..")';
   if (!title) fail(usage);
   const body = composeAdrBody({ body: opts.body, context: opts.context, decision: opts.decision, consequences: opts.consequences });
   if (!body) fail('provide --body, or at least one of --context / --decision / --consequences\n' + usage);
   const status = /^(?:proposed|accepted|deprecated)$/.test(opts.status || '') ? opts.status : 'accepted';
-  const res = upsertEntry(DECISIONS_FILE, title, splitLines(body), opts.confidence, status);
-  console.log('DECISIONS.md: ' + res + ' — "' + title + '" [' + status + ']');
+  const res = upsertEntry(DECISIONS_FILE, title, splitLines(body), opts.confidence, status, opts.supersedes);
+  console.log('DECISIONS.md: ' + res + ' — "' + title + '" [' + status + ']' +
+    (res === 'superseded' && opts.supersedes ? ' (superseded a prior decision matching "' + opts.supersedes + '")' : ''));
+}
+
+// ---------------------------------------------------------------------------
+// decisions — the HEAD view: list the CURRENT accepted decisions (Git-HEAD,
+// not "most similar"). --all includes superseded/deprecated (labeled).
+// ---------------------------------------------------------------------------
+function cmdDecisions(all) {
+  requireLedger();
+  const entries = parseEntries(readFileSafe(DECISIONS_FILE) || '').entries;
+  const rows = entries.filter((e) => all || !(entryStatus(e) === 'superseded' || entryStatus(e) === 'deprecated' || entryExpired(e)));
+  if (rows.length === 0) { console.log(all ? 'No decisions recorded.' : 'No current decisions. (add --all for superseded/deprecated, or `decision` to record one)'); return; }
+  console.log('coderecall decisions — ' + rows.length + (all ? ' total' : ' current (HEAD)') + ':');
+  console.log('');
+  for (const e of rows) {
+    const st = entryStatus(e);
+    const tag = (st === 'superseded' || st === 'deprecated') ? '[' + st + '] ' : (st === 'proposed' ? '[proposed] ' : '');
+    const d = entryDate(e) || '????-??-??';
+    const decLine = (e.lines.find((l) => /^\*\*Decision:\*\*/.test(l)) || '').replace(/^\*\*Decision:\*\*\s*/, '');
+    console.log('  ' + d + '  ' + tag + e.title);
+    if (decLine) console.log('            → ' + (decLine.length > 100 ? decLine.slice(0, 100) + ' …' : decLine));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2034,12 +2119,14 @@ function mcpToolDefs() {
       inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'update_task', description: 'Update TASK.md GOAL/NOW/NEXT. Provide any subset.',
       inputSchema: { type: 'object', properties: { goal: { type: 'string' }, now: { type: 'string' }, next: { type: 'string' } }, additionalProperties: false } },
-    { name: 'write_decision', description: 'Record an ADR-grade decision (DECISIONS.md): why + what + consequences. Supersedes an overlapping prior decision. Provide either `body`, or the structured `context`/`decision`/`consequences`.',
-      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, status: { type: 'string', enum: ['proposed', 'accepted', 'deprecated'] }, confidence: conf }, required: ['title'], additionalProperties: false } },
+    { name: 'write_decision', description: 'Record an ADR-grade decision (DECISIONS.md): why + what + consequences. Provide either `body`, or structured `context`/`decision`/`consequences`. Use `supersedes` to explicitly retire a prior decision by title substring.',
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, supersedes: { type: 'string' }, status: { type: 'string', enum: ['proposed', 'accepted', 'deprecated'] }, confidence: conf }, required: ['title'], additionalProperties: false } },
     { name: 'write_lesson', description: 'Record a lesson / failure + root cause (LESSONS.md).',
       inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
-    { name: 'search_memory', description: 'BM25 lexical search across the ledger + archive.',
-      inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer' } }, required: ['query'], additionalProperties: false } },
+    { name: 'search_memory', description: 'BM25 lexical search, lifecycle-aware: returns CURRENT decisions by default (superseded/deprecated/archived excluded). Set `history:true` to include them.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer' }, history: { type: 'boolean' } }, required: ['query'], additionalProperties: false } },
+    { name: 'list_decisions', description: 'List CURRENT (accepted) decisions — the HEAD view. Set `all:true` to include superseded/deprecated.',
+      inputSchema: { type: 'object', properties: { all: { type: 'boolean' } }, additionalProperties: false } },
   ];
 }
 
@@ -2075,17 +2162,27 @@ function mcpCallTool(name, args) {
       if (!args.title) throw new Error('title is required');
       const body = composeAdrBody(args);
       if (!body) throw new Error('provide `body`, or at least one of context/decision/consequences');
-      return 'DECISIONS.md: ' + upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status);
+      return 'DECISIONS.md: ' + upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status, args.supersedes);
     }
     case 'write_lesson':
       if (!args.title || !args.body) throw new Error('title and body are required');
       return 'LESSONS.md: ' + upsertEntry(LESSONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence);
     case 'search_memory': {
       if (!args.query) throw new Error('query is required');
-      const results = bm25Search(String(args.query), collectChunks(), args.limit > 0 ? args.limit : SEARCH_LIMIT_DEFAULT);
-      if (!results.length) return 'No matches for: ' + args.query;
-      return results.map((r) => r.score.toFixed(2) + '  ' + r.chunk.source + (r.chunk.label ? ' > ' + r.chunk.label : '') +
+      const results = bm25Search(String(args.query), collectChunks({ includeHistory: !!args.history }), args.limit > 0 ? args.limit : SEARCH_LIMIT_DEFAULT);
+      if (!results.length) return 'No matches for: ' + args.query + (args.history ? '' : ' (current truth only; set history:true to include superseded/archived)');
+      return results.map((r) => (chunkIsHistory(r.chunk) ? '[' + (r.chunk.status === 'archived' ? 'archived' : r.chunk.status) + '] ' : '') + r.score.toFixed(2) + '  ' + r.chunk.source + (r.chunk.label ? ' > ' + r.chunk.label : '') +
         '\n    ' + r.chunk.text.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 2).join(' / ')).join('\n');
+    }
+    case 'list_decisions': {
+      const entries = parseEntries(readFileSafe(DECISIONS_FILE) || '').entries
+        .filter((e) => args.all || !(entryStatus(e) === 'superseded' || entryStatus(e) === 'deprecated' || entryExpired(e)));
+      if (!entries.length) return 'No current decisions.';
+      return entries.map((e) => {
+        const st = entryStatus(e);
+        const tag = (st === 'superseded' || st === 'deprecated' || st === 'proposed') ? '[' + st + '] ' : '';
+        return (entryDate(e) || '') + '  ' + tag + e.title;
+      }).join('\n');
     }
     default:
       throw new Error('unknown tool: ' + name);
@@ -2160,7 +2257,7 @@ function cmdMcp() {
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
-  const usage = 'usage: node coderecall.js <init|sync [--all]|status|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decision "<title>" [--context/--decision/--consequences/--status/--confidence]|mcp|score [--json]|selftest|version>';
+  const usage = 'usage: node coderecall.js <init|sync [--all]|status|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|decision "<title>" [--context/--decision/--consequences/--status/--confidence]|mcp|score [--json]|selftest|version>';
   switch (cmd) {
     case 'init': return cmdInit();
     case 'sync': return cmdSync(args.includes('--all'));
@@ -2176,6 +2273,7 @@ function main() {
     case 'remove-githook': return cmdRemoveGitHook();
     case 'graduate': return cmdGraduate(args.includes('--global'));
     case 'decision': return cmdDecision(args);
+    case 'decisions': return cmdDecisions(args.includes('--all'));
     case 'mcp': return cmdMcp();
     case 'score': return cmdScore(args.includes('--json'));
     case 'selftest': return cmdSelftest();
@@ -2186,6 +2284,7 @@ function main() {
       return;
     case 'search': {
       let limit = SEARCH_LIMIT_DEFAULT;
+      let history = false;
       const terms = [];
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--limit') {
@@ -2194,9 +2293,10 @@ function main() {
           i++; // skip the value
           continue;
         }
+        if (args[i] === '--history' || args[i] === '--all') { history = true; continue; }
         terms.push(args[i]);
       }
-      return cmdSearch(terms.join(' '), limit);
+      return cmdSearch(terms.join(' '), limit, history);
     }
     case 'deinit': return cmdDeinit(args.includes('--yes'));
     case undefined:

@@ -114,8 +114,9 @@ node coderecall.js <command>      # 或發佈後：npx coderecall <command>
 | `status` | 顯示 GOAL/NOW/NEXT、checklist、檔案大小、漂移、新鮮度 |
 | `doctor [--selftest]` | 健診（hooks/帳本/路徑/lint/Codex 32KiB）；`--selftest` 加跑回歸測試 |
 | `score [--json]` | 評估工作狀態健康度（GOAL 清晰度 / NEXT 可執行性 / blockers 有無理由 / 新鮮度） |
-| `decision "<title>" [--context/--decision/--consequences/--status/--confidence]` | 一行記下一筆 ADR 決策（含 supersede 既有重疊決策） |
-| `search <query> [--limit N]` | 零依賴 BM25 詞法搜尋（帳本 + archive，中英皆可） |
+| `decision "<title>" [--context/--decision/--consequences/--status/--confidence] [--supersedes "<舊標題/關鍵字>"]` | 一行記下一筆 ADR 決策；`--supersedes` 顯式取代既有決策（不靠標題相似度） |
+| `search <query> [--limit N] [--history]` | 詞法搜尋，**預設只回現行真相**（superseded/deprecated/archive 排除）；`--history` 才含歷史（標 `[superseded]`） |
+| `decisions [--all]` | **HEAD 視圖**：列出目前 accepted 的決策（`--all` 含已取代/棄用） |
 | `digest [--compact]` | 印出 session 注入用摘要（除錯用） |
 | `consolidate` | 歸檔完成項目（月度）、退役 superseded/過期條目、去重、老化降級 |
 | `snapshot` | 手動寫一份快照 |
@@ -236,6 +237,16 @@ DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈：寫入
 { "mcpServers": { "coderecall": { "command": "node", "args": ["<path>/code-recall/coderecall.js", "mcp"] } } }
 ```
 零依賴 stdio JSON-RPC，暴露 `read_memory` / `update_task` / `write_decision` / `write_lesson` / `search_memory`。把「榮譽制寫回」變成工具呼叫；檔案仍是儲存層，AGENTS.md 繼續覆蓋無 MCP 的工具。
+
+### ♻️ 決策的「現行真相」與生命週期治理（influence governance）
+
+長期記憶最危險的不是**忘記**，而是**錯誤地記住**——過時/被取代的決策仍被反覆召回，污染 context（influence rot）。Code Recall 把決策當 **Git 而非向量庫**：重點是「**哪個是 HEAD（現行）**」而非「哪個最像」。
+
+- **現行/歷史分離（P1）**：`search` 與 MCP `search_memory` **預設只回現行決策**；superseded/deprecated/archive 不出現。要看歷史才加 `--history`（且明確標 `[superseded]`）。`decisions` 給你 HEAD 視圖。
+- **顯式取代（P2）**：`decision "新決定" --supersedes "舊關鍵字"` 直接讓舊決策失去影響力——不靠標題相似度（解掉「用字一改就漏接」）。
+- **加權排序（P3）**：召回分數 = `BM25 × 狀態權重(accepted 1.0 / proposed 0.5 / deprecated 0.2 / superseded 0.05) × confidence × recency`。所以同樣命中時,**現行、高信心、近期**的決策一定排前面。
+
+> 設計哲學:LLM 缺的不是 storage,是 **attention**——問題不是能存幾條,而是「這個任務該被看到的是哪幾條」。
 
 ### ✍️ 可靠捕捉決策（reliable capture）
 
