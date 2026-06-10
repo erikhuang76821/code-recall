@@ -1,26 +1,47 @@
-# 🌟 Code Recall — Working memory for coding agents that survives context compaction
+# 🌟 Code Recall — your coding agent's decision log
+
+> **為什麼這樣做、哪些路走不通**——跨 context 壓縮、跨 session、跨工具保存。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml/badge.svg)](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-2.0-orange.svg)](ROADMAP.md)
+[![Version](https://img.shields.io/badge/version-2.3-orange.svg)](ROADMAP.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-**Code Recall** 讓 AI coding agent 在 **context 被壓縮 (compaction) 後仍接得回任務**——這是它的招牌價值。用純 Markdown 工作狀態帳本 + 生命週期 Hook：壓縮前快照、壓縮後把任務狀態重新注入。零依賴、不需常駐程式 (daemon-less)、不需資料庫、不需 API Key、不需網路、代碼不外流。檔案格式開放可攜，Claude Code、Cursor、Windsurf、Copilot、Codex、Gemini 都能讀。
+**Code Recall 是 AI 輔助開發的「決策持久化層」(Decision Persistence Layer)。** 它保存專案最容易弄丟、也最難重建的東西——**為什麼當初這樣做，以及哪些路已被證明走不通**——由 AI 自動維護、本地、零依賴，並靠生命週期 Hook 撐過 context 壓縮 (compaction)、不腐爛。
 
-> The local working-state ledger that makes coding agents survive context compaction. Zero dependencies, no daemon, no vector DB, no API keys, no cloud. The file format is open and portable.
+> The decision log your coding agent keeps for you — *why* you built it this way and *what didn't work* — AI-maintained, local, zero-dependency, and preserved across context compaction. Not a memory database; not a governance platform. Just the durable record of decisions and dead-ends.
 
 **需求：** Node ≥ 10.12（2018 年後的 Node 即可；CI 實測 Node 18 / 20 × Linux / Windows）。
 
 ---
 
+## 🧭 它補的洞，和它不做的事
+
+Claude Code 已有 `/init`（codebase 總覽）和 `/handoff`（對話交接）。它**沒有 decision log**——那正是 Code Recall 補的。
+
+**不取代：**
+- `/init` — codebase 總覽生成
+- `/handoff` — 一次性對話交接摘要
+- `CLAUDE.md` / `AGENTS.md` — 你的常駐專案指示（Code Recall 與它們共存）
+- RAG / 向量 / 語意記憶 — 那是**檢索**，這是**決策 rationale**
+
+**保存（專案最常弄丟的）：**
+- **決策與約束** — 為什麼是現在這樣
+- **失敗嘗試** — 哪些路別再走（don't retry X because Y）
+- **目標與進行中的線** — 你正做到哪（compaction 抹不掉）
+
+…而且不像你會忘記更新的 doc，它每 session 重新注入、compaction 前快照、過期/被取代的決策自動退役（ADR 狀態生命週期）。
+
+---
+
 ## 😫 痛點 (The Problem)
 
-複雜開發中，AI 助手常因 Context Window 耗盡而「失憶」：
+大型專案最容易遺失的，往往不是「做到哪」（看 code/git 就知道），而是：
 
+- **為什麼當初這樣做** + **哪些路已證明走不通**——只活在對話裡，視窗一壓縮就蒸發 → 重新 litigate 已定決策、重走死路（最貴的浪費）。
 - 對話到一半被自動壓縮，agent 斷線、重做、甚至**推翻自己剛寫的東西**。
-- 「為什麼選 X」「別再試 Y」只活在對話裡，視窗一滾就蒸發 → 重複踩坑。
 - 跨工具切換（Claude Code ↔ Cursor ↔ Copilot）記憶無法共享，每次重講。
-- 市面記憶工具（mem0 / supermemory 等）要架 DB、配向量、上雲、付費 API——對「只想讓寫 code 的 agent 別失憶、又不想把代碼送上雲」的人太重。
+- 市面記憶工具（mem0 / supermemory 等）要架 DB、配向量、上雲、付費 API——對「只想讓寫 code 的 agent 別忘了決策、又不想把代碼送上雲」的人太重。
 
 ## 🎯 解決方案 (The Solution)
 
@@ -56,7 +77,7 @@ node path\to\code-recall\coderecall.js init        # Windows
 | 檔案 | 用途 |
 |---|---|
 | `TASK.md` | 當前目標與進度：`GOAL` / `NOW` / `NEXT` + checklist |
-| `DECISIONS.md` | 架構決策與發現（附日期、信心度） |
+| `DECISIONS.md` | **決策日誌（ADR 級）**：Context / Decision / Consequences + status（proposed/accepted/superseded/deprecated）|
 | `LESSONS.md` | 踩坑與根因（"別重試 X 因為 Y"） |
 
 **Git 歸屬（預設 hybrid）：** `init` 會在 `.gitignore` 寫入一段——**耐久的團隊知識（`DECISIONS.md` / `LESSONS.md` + 歸檔）進版控**，**每位開發者各自的工作狀態（`TASK.md` / `sessions.md` / 壓縮快照）留本機**。這樣 `TASK.md` 不會在多人之間造成 `NOW:`/`NEXT:` 合併衝突，git 歷史也不會被機器高頻改動洗版。想在個人私有 repo 也追蹤即時狀態？刪掉 `.gitignore` 區段裡的 `TASK.md` 兩行即可。（committed 的 `AGENTS.md` **刻意不嵌入**即時 `NOW:`/`NEXT:`，避免狀態外洩。）

@@ -73,19 +73,23 @@ UPDATED: 2026-06-10T12:34:56+08:00
 ```
 `NOW:`/`NEXT:`/`GOAL:`/`UPDATED:` are exact-prefix lines (parse with `^NOW: `). Checklist states: `[ ]` todo, `[>]` doing, `[x]` done, `[!]` blocked.
 
-### DECISIONS.md / LESSONS.md entries
+### DECISIONS.md / LESSONS.md entries — ADR-grade (v2.3)
 ```markdown
 ## <short title>
 - date: 2026-06-10
+- status: accepted           (proposed | accepted | superseded | deprecated)
 - confidence: high|med|low
 - expires: 2026-09-01        (optional — auto-forget on/after this date)
-- status: superseded         (optional — set automatically when superseded)
 - superseded-by: <new title> (optional — back-link to the replacement)
 - supersedes: <old title>    (optional — forward-link from the replacement)
-- graduated: 2026-06-10       (optional — exported to docs/ai_wiki once)
-<body, 1-3 lines. LESSONS entries must state what failed AND root cause.>
+- graduated: 2026-06-10       (optional — exported to docs/adr once)
+**Context:** why this came up / the forces        (recommended for DECISIONS)
+**Decision:** what we decided
+**Consequences:** trade-offs, what it rules out
 ```
-Temporal write rule (v2.0): before appending, if an existing ACTIVE `##` title matches case-insensitively at >0.8 token overlap, the old entry is marked `status: superseded` + `superseded-by:` (kept for history, not overwritten) and the new entry records `supersedes:`. `consolidate` retires superseded + expired entries to `archive/retired-YYYY-MM.md`.
+Backward-compatible: `status` and the `Context/Decision/Consequences` structure are optional; a plain `date + confidence + free body` entry still parses, and an absent `status` is treated as live. LESSONS entries must state what failed AND the root cause (the "dead-ends" half of the log).
+
+Status lifecycle (ADR): new entries are written `accepted`. Temporal write rule: appending an entry whose title overlaps an existing ACTIVE one at >0.8 token Jaccard marks the old `status: superseded` + `superseded-by:` (kept for history, not overwritten); the new one records `supersedes:`. `consolidate` retires **superseded / deprecated / expired** entries to `archive/retired-YYYY-MM.md`. `doctor`/`precommit` lint rejects an invalid `status` value. The MCP `write_decision` tool accepts structured `context`/`decision`/`consequences` (or a raw `body`).
 
 ## Hook contract (Claude Code)
 
