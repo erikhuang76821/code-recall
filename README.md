@@ -98,7 +98,7 @@ Memo-star 透過監聽 AI 工具的生命週期 (Lifecycle Hooks)，實現自動
 3. **Cross-sync：** 藉由 `AGENTS.md` 協定，確保本地 LLM、MCP 伺服器或不同 IDE 間的狀態保持一致。
 
 ```
-                         ┌──────────────────────────────┐
+                         ┌───────────────────────────────┐
                          │      <project>/.ai/memory/    │
                          │  TASK.md      (GOAL/NOW/NEXT) │
                          │  DECISIONS.md (dated entries) │
