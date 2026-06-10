@@ -278,7 +278,7 @@ commit 時自動以 `TASK.md` 重生 AGENTS.md 摘要 + lint 帳本，並 re-sta
 ### 🎓 選配（實驗性，非核心）：知識畢業 + 跨專案教訓
 
 ```sh
-node coderecall.js graduate            # >90 天、confidence high 匯出到 docs/ai_wiki/
+node coderecall.js graduate            # >90 天、confidence high 匯出成 docs/adr/NNNN-*.md（ADR 檔）
 node coderecall.js graduate --global   # 另寫進 ~/.coderecall/GLOBAL-LESSONS.md（跨專案）
 ```
 非破壞性（條目留在帳本標 `graduated:`，只匯出一次）。digest 注入跨專案教訓（限 top-3）：開 `CODE_RECALL_GLOBAL_LESSONS=1`；全域目錄可用 `CODE_RECALL_GLOBAL_DIR` 改位置。

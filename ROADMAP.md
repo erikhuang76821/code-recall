@@ -30,8 +30,8 @@
 2. **[M] 可靠捕捉(頭號風險 = 榮譽制寫回)**:MCP `write_decision` + Stop-hook capture 提示 + `score` 對「決策 log 過薄/過期」扣分。讓「記一筆決策」盡量不靠 agent 自律。
 3. **[M] 浮現 + 防再 litigate**:相關決策在 agent 觸碰相關區域時浮現(先靠 `search`/digest);進階:當提案牴觸一條 accepted 決策時示警。
 4. **[S] 定位落地**:README 改 decision-log-led(招牌 = 「your agent's decision log: why + dead-ends, preserved across compaction」);not-replace(`/init` `/handoff` `CLAUDE.md` RAG)/preserves 區塊。
-5. **[S] ADR 畢業路徑**:`graduate` 目標改為慣例的 `docs/adr/`(而非 `docs/ai_wiki/`),把 >90 天高信心決策輸出為永久 ADR。
-6. **[L] 證據**:benchmark — 有/無 decision log 時,agent「重複決策數 / 重走死路次數 / 重新 litigate 次數」的差異。
+5. ✅ **[S] ADR 畢業路徑**:`graduate` 把 >90 天高信心決策輸出成 `docs/adr/NNNN-*.md`(慣例 ADR 檔,可被 adr-tools/log4brains 消費);lessons → `docs/adr/lessons.md`。(順手修掉 graduate 漏接 `accepted` 狀態的 bug。)
+6. 🟡 **[L] 證據**:`bench/bench.js`(`npm run bench`)已交付**確定性 context-hygiene benchmark**(naive append-only vs Code Recall 的注入 token 數 / 陳舊內容占比 / 搜尋陳舊命中數,用真 CLI 量)。**live-agent benchmark**(有/無 decision log 的重決/重走死路/完成率)以**誠實協定**寫在 `bench/README.md`,需自帶 agent 跑——刻意不出假數字。
 
 ## 對比總表
 

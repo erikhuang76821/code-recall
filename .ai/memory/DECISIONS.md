@@ -98,3 +98,11 @@ UserPromptSubmit reminder is opt-in (installers don't register it) because token
 **Context:** decisions were never injected into agent context (only a count); re-decided/contradicted silently
 **Decision:** inject top-5 current decisions into the digest; warn when a new decision overlaps an accepted one below the auto-supersede bar
 **Consequences:** keeps effective decisions influential, bounded so no pollution; cannot detect code-vs-decision contradiction (needs LLM, out of scope)
+
+## Honest benchmark = deterministic context-hygiene now; live-agent A/B as documented protocol
+- date: 2026-06-10
+- status: accepted
+- confidence: high
+**Context:** reviewers kept asking for evidence; a faked agent benchmark would be worse than none
+**Decision:** ship bench/bench.js (real-CLI, deterministic: tokens/stale%/search-hits, naive vs Code Recall) + bench/README.md live-agent protocol; graduate now emits docs/adr/NNNN ADR files
+**Consequences:** honest, reproducible, zero-dep; task-success claims require a live agent we do not fake; ADR output is the north-star BRIDGE
