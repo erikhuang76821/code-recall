@@ -55,6 +55,13 @@ Rationale: `TASK.md`'s `NOW:`/`NEXT:` are per-developer, per-branch working stat
 
 Critical consequence: the committed `AGENTS.md` marker section **must not embed live GOAL/NOW/NEXT** — that would leak local working state into version control through the back door. So `renderSectionBody` emits only the protocol + a pointer to `.ai/memory/TASK.md`; Claude Code still gets live state via the SessionStart hook digest, and other tools read `TASK.md` per the protocol. `deinit` strips the managed `.gitignore` block.
 
+## Scope: Decision Visibility + Anti-Relitigation (NOT enforcement)
+> Code Recall does not enforce architectural decisions against code.
+>
+> Instead, it keeps accepted decisions visible at the start of agent work (the digest surfaces the top current decisions), and warns when newly written decisions appear to reopen or duplicate existing accepted decisions without explicitly superseding them.
+
+This is the deliberate ceiling: detecting whether *code* violates a decision needs semantic understanding (LLM/vector) and would pull the tool into policy-engine scope. Surfacing (digest injects top-N current decisions; `proposed`/superseded/deprecated/expired excluded) maximizes "the agent sees current truth"; the `write_decision`/`decision` overlap warning (resolve with `--supersedes`, `--confirm-new`, or a revised title) maximizes "a settled question isn't silently reopened". Both are zero-dependency and local.
+
 ## Ledger file formats (strict, machine-parseable)
 
 ### TASK.md

@@ -90,3 +90,11 @@ UserPromptSubmit reminder is opt-in (installers don't register it) because token
 **Context:** search ignored status/confidence/recency, so superseded decisions surfaced equally (influence rot)
 **Decision:** default search excludes superseded/deprecated/archive; --history opts in; rank = BM25 x status x confidence x recency; add decisions HEAD view + explicit --supersedes
 **Consequences:** treats decisions like Git HEAD not vectors; stays local/zero-dep (influence governance, not approval); pruning already done
+
+## Surface current decisions in digest + warn on re-litigation
+- date: 2026-06-10
+- status: accepted
+- confidence: high
+**Context:** decisions were never injected into agent context (only a count); re-decided/contradicted silently
+**Decision:** inject top-5 current decisions into the digest; warn when a new decision overlaps an accepted one below the auto-supersede bar
+**Consequences:** keeps effective decisions influential, bounded so no pollution; cannot detect code-vs-decision contradiction (needs LLM, out of scope)

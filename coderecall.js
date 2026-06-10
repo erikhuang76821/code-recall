@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.5.0.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.6.0.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -47,8 +47,10 @@ const STALE_REMINDER_MINUTES = 45;     // UserPromptSubmit reminder fires after 
 const CODEX_AGENTS_WARN_BYTES = 32768; // Codex CLI reads ~32KiB of AGENTS.md; warn beyond
 const GRADUATE_AGE_DAYS = 90;          // entries older than this + high confidence may graduate
 const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the digest (opt-in)
+const DIGEST_DECISIONS_TOPN = 5;       // current decisions surfaced in the digest (newest)
+const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.5.0';
+const VERSION = '2.6.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -516,6 +518,40 @@ function topGlobalLessons(n) {
   return entries.slice(-n).reverse().map((e) => e.title);
 }
 
+/** Titles of the current (non-superseded/deprecated/expired) decisions, newest first, capped at n. */
+function currentDecisions(n) {
+  const text = readFileSafe(DECISIONS_FILE);
+  if (text === null) return [];
+  const active = parseEntries(text).entries.filter((e) => {
+    const st = entryStatus(e);
+    // Surface CURRENT TRUTH only: accepted/active. `proposed` is still under
+    // consideration (not yet decided); superseded/deprecated/expired are history.
+    return st !== 'superseded' && st !== 'deprecated' && st !== 'proposed' && !entryExpired(e);
+  });
+  active.sort((a, b) => (entryDate(b) || '').localeCompare(entryDate(a) || ''));
+  return active.slice(0, n).map((e) => e.title);
+}
+
+/**
+ * Anti-re-litigation: the active accepted decision most similar to `title` whose
+ * overlap sits in [RELITIGATE_LOW, TITLE_OVERLAP_THRESHOLD] — i.e. clearly
+ * related but below the auto-supersede bar, the band where re-deciding hides.
+ * Returns the matched title or null.
+ */
+function nearMatchDecision(title) {
+  const text = readFileSafe(DECISIONS_FILE);
+  if (text === null) return null;
+  let best = null;
+  let bestOv = 0;
+  for (const e of parseEntries(text).entries) {
+    const st = entryStatus(e);
+    if (st === 'superseded' || st === 'deprecated') continue;
+    const ov = titleOverlap(e.title, title);
+    if (ov >= RELITIGATE_LOW && ov <= TITLE_OVERLAP_THRESHOLD && ov > bestOv) { best = e.title; bestOv = ov; }
+  }
+  return best;
+}
+
 function buildDigest(opts) {
   opts = opts || {};
   const taskText = readFileSafe(TASK_FILE);
@@ -570,6 +606,19 @@ function buildDigest(opts) {
   const age = taskAgeHours(t);
   if (heartbeatStale() || (age !== null && age > STALE_HOURS)) {
     lines.push('Ledger may be stale — verify before trusting.');
+  }
+  // Surfacing (P-surfacing): inject the top current decisions so the agent SEES
+  // them every session / after compaction — "keep effective decisions
+  // influential". Bounded (newest N accepted, titles only, fenced+sanitized);
+  // none on a fresh ledger, so the fresh-from-template budget is unaffected.
+  // This is curated attention (top-N current), NOT the whole log — the opposite
+  // of context pollution.
+  const decns = currentDecisions(DIGEST_DECISIONS_TOPN);
+  if (decns.length) {
+    lines.push(LEDGER_FENCE_BEGIN);
+    lines.push('Current decisions (' + decns.length + ', newest first — read before proposing changes):');
+    for (const d of decns) lines.push(neutralizeLedger(sanitize('- ' + d)));
+    lines.push(LEDGER_FENCE_END);
   }
   // Optional cross-project lessons (opt-in: CODE_RECALL_GLOBAL_LESSONS=1). Capped at
   // GLOBAL_LESSONS_TOPN titles, ledger-derived → sanitized + fenced, to honor the
@@ -1993,6 +2042,19 @@ function cmdSelftest() {
     check('search --history surfaces superseded, labeled', /Use SQLite for local store/.test(histSearch) && /\[superseded\]/.test(histSearch));
     const head = run(['decisions']);
     check('decisions HEAD view excludes superseded', /Switch to Postgres/.test(head) && !/Use SQLite for local store/.test(head));
+    // Surfacing: the digest injects current decisions (and not superseded ones).
+    const dig = run(['digest']);
+    check('digest surfaces current decisions', /Current decisions/.test(dig) && /Switch to Postgres for the store/.test(dig));
+    check('digest does NOT surface a superseded decision', !/- Use SQLite for local store/.test(dig));
+    // Anti-re-litigation: a new decision in the overlap band warns (no --supersedes).
+    run(['decision', 'Adopt feature flags for rollout', '--decision', 'gate releases']);
+    const relit = run(['decision', 'Adopt feature flags for releases', '--decision', 'gate by flag']);
+    check('re-litigation warning fires on a near-match', /resembles accepted decision/.test(relit));
+    const confirmed = run(['decision', 'Adopt feature flags for staging', '--decision', 'gate by flag', '--confirm-new']);
+    check('--confirm-new suppresses the re-litigation warning', !/resembles accepted decision/.test(confirmed));
+    run(['decision', 'Maybe evaluate GraphQL', '--decision', 'spike only', '--status', 'proposed']);
+    const dig3 = run(['digest']);
+    check('digest excludes proposed decisions from surfacing', !/Maybe evaluate GraphQL/.test(dig3));
     fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore
   } catch (e) {
     check('selftest ran without throwing', false);
@@ -2017,22 +2079,33 @@ function cmdSelftest() {
 // ---------------------------------------------------------------------------
 function cmdDecision(args) {
   requireLedger();
+  const BOOL = { 'confirm-new': 1, distinct: 1 }; // boolean flags (no value follows)
   const opts = {};
   const positional = [];
   for (let i = 1; i < args.length; i++) {
     const a = args[i];
-    if (a.indexOf('--') === 0) { opts[a.slice(2)] = args[i + 1]; i++; }
-    else positional.push(a);
+    if (a.indexOf('--') === 0) {
+      const key = a.slice(2);
+      if (BOOL[key]) { opts[key] = true; } else { opts[key] = args[i + 1]; i++; }
+    } else positional.push(a);
   }
   const title = positional.join(' ').trim();
-  const usage = 'usage: node coderecall.js decision "<title>" [--context .. --decision .. --consequences ..] [--supersedes "<old title/substr>"] [--status proposed|accepted|deprecated] [--confidence high|med|low]  (or --body "..")';
+  const usage = 'usage: node coderecall.js decision "<title>" [--context .. --decision .. --consequences ..] [--supersedes "<old title/substr>"] [--confirm-new] [--status proposed|accepted|deprecated] [--confidence high|med|low]  (or --body "..")';
   if (!title) fail(usage);
   const body = composeAdrBody({ body: opts.body, context: opts.context, decision: opts.decision, consequences: opts.consequences });
   if (!body) fail('provide --body, or at least one of --context / --decision / --consequences\n' + usage);
   const status = /^(?:proposed|accepted|deprecated)$/.test(opts.status || '') ? opts.status : 'accepted';
+  const confirmNew = !!(opts['confirm-new'] || opts.distinct);
+  const near = (opts.supersedes || confirmNew) ? null : nearMatchDecision(title);
   const res = upsertEntry(DECISIONS_FILE, title, splitLines(body), opts.confidence, status, opts.supersedes);
   console.log('DECISIONS.md: ' + res + ' — "' + title + '" [' + status + ']' +
     (res === 'superseded' && opts.supersedes ? ' (superseded a prior decision matching "' + opts.supersedes + '")' : ''));
+  if (near && res !== 'superseded') {
+    console.log('  !! resembles accepted decision "' + near + '". Choose one:');
+    console.log('       --supersedes "' + near + '"   (this replaces it)');
+    console.log('       --confirm-new                 (it is a distinct decision)');
+    console.log('       or revise the title           (avoid re-litigating a settled question)');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2120,7 +2193,7 @@ function mcpToolDefs() {
     { name: 'update_task', description: 'Update TASK.md GOAL/NOW/NEXT. Provide any subset.',
       inputSchema: { type: 'object', properties: { goal: { type: 'string' }, now: { type: 'string' }, next: { type: 'string' } }, additionalProperties: false } },
     { name: 'write_decision', description: 'Record an ADR-grade decision (DECISIONS.md): why + what + consequences. Provide either `body`, or structured `context`/`decision`/`consequences`. Use `supersedes` to explicitly retire a prior decision by title substring.',
-      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, supersedes: { type: 'string' }, status: { type: 'string', enum: ['proposed', 'accepted', 'deprecated'] }, confidence: conf }, required: ['title'], additionalProperties: false } },
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, supersedes: { type: 'string' }, confirmNew: { type: 'boolean', description: 'acknowledge a flagged overlap as a distinct decision (suppresses the re-litigation note)' }, status: { type: 'string', enum: ['proposed', 'accepted', 'deprecated'] }, confidence: conf }, required: ['title'], additionalProperties: false } },
     { name: 'write_lesson', description: 'Record a lesson / failure + root cause (LESSONS.md).',
       inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
     { name: 'search_memory', description: 'BM25 lexical search, lifecycle-aware: returns CURRENT decisions by default (superseded/deprecated/archived excluded). Set `history:true` to include them.',
@@ -2162,7 +2235,11 @@ function mcpCallTool(name, args) {
       if (!args.title) throw new Error('title is required');
       const body = composeAdrBody(args);
       if (!body) throw new Error('provide `body`, or at least one of context/decision/consequences');
-      return 'DECISIONS.md: ' + upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status, args.supersedes);
+      const near = (args.supersedes || args.confirmNew) ? null : nearMatchDecision(String(args.title));
+      const res = upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status, args.supersedes);
+      return 'DECISIONS.md: ' + res + (near && res !== 'superseded'
+        ? ' — NOTE: resembles accepted decision "' + near + '"; pass supersedes to replace it, or confirm it is distinct (possible re-litigation).'
+        : '');
     }
     case 'write_lesson':
       if (!args.title || !args.body) throw new Error('title and body are required');

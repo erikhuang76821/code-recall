@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.6 (2026-06-10)
+
+**Surfacing + anti-re-litigation** — keep effective decisions *influential*, not just stored.
+
+1. **Decision surfacing in the digest.** SessionStart / post-compaction digest now injects the **top-5 current decisions** (titles only, newest-first; superseded/deprecated/expired **and `proposed`** excluded — only accepted current truth; fenced+sanitized). Previously DECISIONS only contributed a count and never reached the agent's context; now the agent sees current decisions every session — curated attention (top-N current), not the whole log, so no context pollution. None on a fresh ledger, so the ≤1200-char fresh-digest budget is unaffected.
+2. **Re-litigation warning.** Recording a decision (`decision` CLI / MCP `write_decision`) that clearly overlaps an accepted decision but sits **below** the auto-supersede bar offers three resolutions: `--supersedes "X"` (replace), `--confirm-new` (it's distinct — suppresses the note), or revise the title. Catches re-deciding that the >0.8-Jaccard auto-match misses. SPEC now states the boundary verbatim: *Code Recall does not enforce decisions against code; it keeps accepted decisions visible and warns when new decisions reopen settled ones without superseding.*
+
+Honest boundary (stays zero-dep, no LLM/vector): detecting that *code* contradicts a decision needs semantics and is out of scope. Code Recall instead puts current decisions in front of the agent and warns at authoring time — maximizing "seen, not re-decided" without semantic contradiction detection. selftest 23/23. 2.6.0.
+
 ## v2.5 (2026-06-10)
 
 **Influence governance** — the deepest gap for any long-term memory tool isn't *forgetting*, it's *wrongly remembering*: superseded/stale decisions keep getting recalled and pollute context ("influence rot"). Code Recall already had the lifecycle *model* (status) but ignored it at retrieval; this release makes it decisive. Treats decisions like **Git (what's HEAD)**, not a vector store (what's most similar).

@@ -246,7 +246,12 @@ DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈：寫入
 - **顯式取代（P2）**：`decision "新決定" --supersedes "舊關鍵字"` 直接讓舊決策失去影響力——不靠標題相似度（解掉「用字一改就漏接」）。
 - **加權排序（P3）**：召回分數 = `BM25 × 狀態權重(accepted 1.0 / proposed 0.5 / deprecated 0.2 / superseded 0.05) × confidence × recency`。所以同樣命中時,**現行、高信心、近期**的決策一定排前面。
 
+- **主動浮現（surfacing）**：每次 session / compaction 後，digest **自動帶出 top-5 現行決策**（僅標題、newest-first、**只 accepted**——proposed/superseded/expired 都排除）——讓 agent 動手前就看得到現行真相，less likely 去重決或牴觸。Bounded、不污染（curated attention，非全量）。
+- **防再 litigate**：用 `decision` 記新決策時，若與某條 accepted 決策**明顯重疊但未到自動取代門檻**，提示三條解法：`--supersedes "X"`（取代）、`--confirm-new`（確認是不同決策）、或改寫標題。防止同一議題被「重新開庭」。
+
 > 設計哲學:LLM 缺的不是 storage,是 **attention**——問題不是能存幾條,而是「這個任務該被看到的是哪幾條」。
+>
+> ⚠️ 零依賴邊界:偵測「**程式碼**牴觸決策」需要語意理解(LLM/向量),不在範圍內。Code Recall 的做法是**把現行決策推到 agent 眼前 + 作者下筆時示警**——最大化「看得到、不重決」的機率,但不做語意級的矛盾偵測。
 
 ### ✍️ 可靠捕捉決策（reliable capture）
 
