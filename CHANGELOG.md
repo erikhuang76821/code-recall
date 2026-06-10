@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.3 (2026-06-10)
+
+**North star set:** Code Recall is the **Decision Persistence Layer** — it preserves *why you built it this way* and *what didn't work*, AI-maintained, local, surviving compaction. It is the foundation of the Decision Lifecycle, deliberately **not** a governance/approval/compliance platform (that needs identity/servers/multi-user — a different product). Scope fences are documented at the top of [ROADMAP.md](ROADMAP.md).
+
+1. **DECISIONS.md is now ADR-grade.** Entries support a `status` (proposed/accepted/superseded/deprecated) and the `Context` / `Decision` / `Consequences` structure, with the existing `supersedes`/`expires` model serving as the ADR status lifecycle. Fully backward-compatible — a plain `date + confidence + body` entry still parses, and an absent status is treated as live. `consolidate` now retires `deprecated` entries too; `doctor`/`precommit` lint rejects invalid status values; the MCP `write_decision` tool accepts structured `context`/`decision`/`consequences` (or a raw `body`).
+2. **README repositioned to decision-log-led.** Headline is now "your coding agent's decision log: why you did it, what didn't work, kept across compaction", with a "what it fills / what it does not replace (`/init`, `/handoff`, `CLAUDE.md`, RAG)" block.
+
 ## v2.2 (2026-06-10)
 
 1. **`coderecall score [--json]` — working-state health.** Rates whether the ledger can actually drive an agent's next move, via a transparent weighted heuristic: GOAL specificity, NEXT concreteness (vague values like "continue"/"TBD" score low even when the field is "filled"), NOW set, every `[!]` blocker carrying a reason, freshness, and grounding in recorded decisions/lessons. Each dimension reports its score + why + a "fix first" list. Deliberately not an ML/precision number — the goal is to catch *false completeness* (a ledger that looks done but can't tell an agent what to do next). `status` now prints the one-line overall. selftest gained 3 checks (concrete NEXT = 100, vague NEXT < 60, fresh template scores low) so the heuristic stays honest.

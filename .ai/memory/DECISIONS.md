@@ -7,6 +7,14 @@ Entry format (strict):
   <body, 1-3 lines>
 -->
 
+## DECISIONS.md upgraded to ADR-grade (status + Context/Decision/Consequences)
+- date: 2026-06-10
+- status: accepted
+- confidence: high
+**Context:** core direction is decision persistence; flat date+confidence entries didn't capture WHY/consequences or an ADR status lifecycle.
+**Decision:** add optional `status` (proposed/accepted/superseded/deprecated) + Context/Decision/Consequences structure, reusing existing supersede/expire as the lifecycle; MCP write_decision takes structured fields. Backward-compatible (no parser rewrite — sections are body markdown).
+**Consequences:** consolidate now retires deprecated too; lint validates status; old entries without status stay valid (treated as live). Kept it lightweight — no enforcement/approval (that's the OUT scope fence).
+
 ## Core direction = Decision Persistence (AI-maintained, compaction-surviving ADR)
 - date: 2026-06-10
 - confidence: high

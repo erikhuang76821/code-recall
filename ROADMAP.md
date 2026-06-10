@@ -2,6 +2,19 @@
 
 > 來源:六方評估(低依賴稽核 / 兼容矩陣稽核 / vs llm-wiki / vs MemPalace / Codex CLI 8.5 / Gemini CLI 7.8),2026-06-10。
 
+## ⭐ 北極星 (Product goal + 範圍柵欄)
+
+**Code Recall 是 AI 輔助開發的「決策持久化層」(Decision Persistence Layer)。** 它捕捉並保存:**決定了什麼、為什麼、否決了什麼、哪些是已證實的死路**——由 AI 自動維護、本地、零依賴,跨 compaction 與交接不流失、不腐爛。它是 Decision Lifecycle 的**地基**,不是治理引擎。
+
+**填補的缺口:** AI IDE 強在 Retrieval → Reasoning → CodeGen,弱在 Decision → Approval → Governance。`/init`(codebase 文件)與 `/handoff`(對話交接)已有,但**持久 decision log 沒有**。能記決策的工具很多,把「決策持久化」當核心的幾乎沒有。
+
+**範圍柵欄(每個 PR 的取捨依據,防止漂移):**
+- **IN(做):** 決策捕捉、理由、死路、ADR 級狀態生命週期(proposed/accepted/superseded/deprecated)、跨 compaction 存活、**本地勸告式**「這牴觸決策 #N」、相關決策浮現。
+- **OUT(不做 — 屬另一個產品,需身分/伺服器/多人,背叛零依賴/本地/無雲):** 審批流、RBAC/簽核、合規強制、成本預算閘、稽核/問責伺服器、多人治理、雲。
+- **BRIDGE(橋接):** 匯出/互通,讓真正的治理工具(GitHub/Jira/ServiceNow/企業 agent)來**消費** Code Recall 的決策紀錄。
+
+**Governance 天花板 = 本地 advisory(agent 浮現/示警牴觸)+ 既有本地 git pre-commit 閘(`--strict`)。** 越過此線就是別人的戰場——不往上爬治理棧,往下扎根把 record 層做成標準。
+
 ## 🧭 主軸 (Core direction):Decision Persistence — AI 維護、撐過 compaction 的 ADR
 
 **定位收斂結論(三方審查 + 多輪定位辯論後拍板):** Code Recall 的核心能力是「**決策持久化**」——保存「**為什麼這樣做**」與「**哪些路已證明走不通**」,並讓它們**跨 context 重置/compaction/交接不流失、不腐爛**。

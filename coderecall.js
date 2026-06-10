@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.2.0.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.3.0.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -48,7 +48,7 @@ const CODEX_AGENTS_WARN_BYTES = 32768; // Codex CLI reads ~32KiB of AGENTS.md; w
 const GRADUATE_AGE_DAYS = 90;          // entries older than this + high confidence may graduate
 const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the digest (opt-in)
 
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -439,7 +439,7 @@ function upsertEntry(filePath, title, bodyLines, confidence) {
     if (text === null) fail('missing ' + filePath);
     const parsed = parseEntries(text);
     const clean = splitLines(sanitize(bodyLines.join('\n')));
-    const freshLines = ['## ' + title, '- date: ' + todayDate(), '- confidence: ' + (confidence || 'med')];
+    const freshLines = ['## ' + title, '- date: ' + todayDate(), '- status: accepted', '- confidence: ' + (confidence || 'med')];
     let supersededTitle = null;
     for (const e of parsed.entries) {
       if (entryStatus(e) === 'superseded') continue;
@@ -991,8 +991,10 @@ function ledgerLintIssues() {
     if (text === null) continue;
     for (const e of parseEntries(text).entries) {
       const body = e.lines.join('\n');
+      const stMatch = /^- status:\s*(\S+)\s*$/m.exec(body);
       if (!/^- date:\s*\d{4}-\d{2}-\d{2}\s*$/m.test(body)) issues.push(label + ' entry "' + e.title + '" — bad/missing date');
       else if (!/^- confidence:\s*(?:high|med|low)\s*$/m.test(body)) issues.push(label + ' entry "' + e.title + '" — bad/missing confidence');
+      else if (stMatch && !/^(?:proposed|accepted|superseded|deprecated)$/.test(stMatch[1])) issues.push(label + ' entry "' + e.title + '" — invalid status "' + stMatch[1] + '" (proposed|accepted|superseded|deprecated)');
     }
   }
   for (const l of splitLines(readFileSafe(TASK_FILE) || '')) {
@@ -1229,10 +1231,11 @@ function consolidateLocked() {
     const text = readFileSafe(p);
     if (text === null) continue;
     const parsed = parseEntries(text);
-    // 2a. Retire superseded (temporal model) + expired (auto-forget) entries.
+    // 2a. Retire superseded/deprecated (ADR status lifecycle) + expired (auto-forget).
     const retired = [];
     let active = parsed.entries.filter((e) => {
-      if (entryStatus(e) === 'superseded' || entryExpired(e)) { retired.push(e); return false; }
+      const st = entryStatus(e);
+      if (st === 'superseded' || st === 'deprecated' || entryExpired(e)) { retired.push(e); return false; }
       return true;
     });
     // 2b. Legacy safety dedupe among the remaining active entries (covers
@@ -1269,7 +1272,7 @@ function consolidateLocked() {
     }
     parsed.entries = keep;
     writeFileAtomic(p, serializeEntries(parsed));
-    report.push(label + ': ' + retired.length + ' retired (superseded/expired), ' + deduped + ' duplicate(s) merged, ' + flagged + ' flagged confidence: low');
+    report.push(label + ': ' + retired.length + ' retired (superseded/deprecated/expired), ' + deduped + ' duplicate(s) merged, ' + flagged + ' flagged confidence: low');
   }
 
   // 3. Refresh AGENTS.md digest after consolidation
@@ -1989,13 +1992,24 @@ function mcpToolDefs() {
       inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'update_task', description: 'Update TASK.md GOAL/NOW/NEXT. Provide any subset.',
       inputSchema: { type: 'object', properties: { goal: { type: 'string' }, now: { type: 'string' }, next: { type: 'string' } }, additionalProperties: false } },
-    { name: 'write_decision', description: 'Record a durable decision (DECISIONS.md). Supersedes an overlapping prior entry.',
-      inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
+    { name: 'write_decision', description: 'Record an ADR-grade decision (DECISIONS.md): why + what + consequences. Supersedes an overlapping prior decision. Provide either `body`, or the structured `context`/`decision`/`consequences`.',
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, confidence: conf }, required: ['title'], additionalProperties: false } },
     { name: 'write_lesson', description: 'Record a lesson / failure + root cause (LESSONS.md).',
       inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
     { name: 'search_memory', description: 'BM25 lexical search across the ledger + archive.',
       inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer' } }, required: ['query'], additionalProperties: false } },
   ];
+}
+
+/** Compose an ADR-grade decision body from structured fields, or pass `body` through. */
+function composeAdrBody(a) {
+  if (typeof a.body === 'string' && a.body.trim()) return a.body;
+  const parts = [];
+  const add = (label, v) => { if (typeof v === 'string' && v.trim()) parts.push('**' + label + ':** ' + v.replace(/[\r\n]+/g, ' ').trim()); };
+  add('Context', a.context);
+  add('Decision', a.decision);
+  add('Consequences', a.consequences);
+  return parts.join('\n');
 }
 
 /** Execute one MCP tool call. Returns a result string (throws → isError). */
@@ -2015,9 +2029,12 @@ function mcpCallTool(name, args) {
       if (!done.length) return 'No fields given. Provide goal/now/next.';
       return 'Updated: ' + done.join(', ') + '.';
     }
-    case 'write_decision':
-      if (!args.title || !args.body) throw new Error('title and body are required');
-      return 'DECISIONS.md: ' + upsertEntry(DECISIONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence);
+    case 'write_decision': {
+      if (!args.title) throw new Error('title is required');
+      const body = composeAdrBody(args);
+      if (!body) throw new Error('provide `body`, or at least one of context/decision/consequences');
+      return 'DECISIONS.md: ' + upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence);
+    }
     case 'write_lesson':
       if (!args.title || !args.body) throw new Error('title and body are required');
       return 'LESSONS.md: ' + upsertEntry(LESSONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence);
