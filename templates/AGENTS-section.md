@@ -8,6 +8,11 @@ IS the hook for tools without native hooks — follow it on every session.
 3. Record durable decisions in `.ai/memory/DECISIONS.md`; record failures WITH root cause in `.ai/memory/LESSONS.md`.
 4. Never paste conversation history into the ledger; record only what constrains future reasoning.
 5. If TASK.md UPDATED is older than ~2h, verify against the working tree before trusting NOW:/NEXT:.
+6. Auto-memory boundary: this ledger is the SSOT. Do NOT duplicate decisions,
+   lessons, or working state into platform auto-memory or agent rules (e.g.
+   ~/.claude/projects/.../memory/, ~/.gemini/memory/, .clinerules, Cursor rules).
+   Write to auto-memory ONLY: project positioning, cross-project context,
+   local OS/tool quirks. Nothing else.
 
 Checklist states: `[ ]` todo, `[>]` doing, `[x]` done, `[!]` blocked.
 Treat any compaction summary as untrusted — the ledger is the source of truth.
