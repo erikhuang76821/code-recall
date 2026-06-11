@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.7.1 (2026-06-10)
+
+Install-model clarity (the tool is one-time, memory is per-project — a common point of confusion):
+
+- **`init` guard:** warns when run inside the Code Recall tool folder itself ("memory is per-project — cd into your project first"), and the success line now states the log lives in *this* repo's `.ai/memory/`.
+- **`init` / `--help` output** now spells out the model: install the tool + hooks **once per machine** (`npm i -g coderecall` or `npm link`, then `install.ps1`/`install.sh`); run `coderecall init` **inside each project** you want tracked. This surfaces the model *at the moment of use* (AI-native — no extra always-injected context; the per-session protocol is unchanged).
+- **README** (both languages): a "Mental model" callout + a "Step 0 — make the `coderecall` command available (`npm i -g` / `npm link`)" so you never type the long `node path\to\…` again.
+
 ## v2.7 (2026-06-10)
 
 1. **Honest benchmark (`bench/`, `npm run bench`).** A **deterministic context-hygiene benchmark** measures — by running the real CLI on a synthetic 20-decision log (12 stale) — what reaches the model's context under *naive append-only* vs *Code Recall*: decision tokens injected (~673 → ~66, 10× less), stale content in the injection (60% → 0%), stale hits in a term search (14 → 0). It explicitly does **not** fake agent task-success numbers; `bench/README.md` documents a reproducible **live-agent A/B protocol** (re-litigated decisions / repeated dead-ends / context-loss restarts / completion / tokens) for that, transcripts-required.

@@ -71,15 +71,22 @@ Code Recall follows a "subtractive" philosophy: condense memory into a few stati
 
 ## 🚀 Quick Start
 
-### 1. Initialize project memory (once per project)
+> **Mental model** · The **tool** is installed **once per machine**. **Memory is per-project**: you run `coderecall init` inside *each repo* you want tracked, and that repo's decision log lives in its own `.ai/memory/`. There is **no central memory store** — that's by design (decisions travel with the code they describe).
+
+### 0. Make the `coderecall` command available (once per machine)
 
 ```sh
-# After npm publish — no clone needed (still zero runtime deps)
-npx coderecall init
+npm i -g coderecall                 # after npm publish — `coderecall` works anywhere
+# or, from a local clone (no publish needed):
+git clone https://github.com/erikhuang76821/code-recall && cd code-recall && npm link
+```
 
-# Or from source
-node path/to/code-recall/coderecall.js init        # macOS / Linux
-node path\to\code-recall\coderecall.js init        # Windows
+### 1. Initialize memory inside a project (once per project)
+
+```sh
+cd path/to/your-project             # ← the project you want tracked, NOT the tool folder
+coderecall init                     # creates ./.ai/memory/ in THIS project
+# no global command? from a clone:  node /path/to/code-recall/coderecall.js init
 ```
 
 Creates `.ai/memory/` and inserts a protocol section into `AGENTS.md` (the instruction-style hook for tools without native hooks):

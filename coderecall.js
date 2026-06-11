@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.7.0.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.7.1.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -50,7 +50,7 @@ const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the d
 const DIGEST_DECISIONS_TOPN = 5;       // current decisions surfaced in the digest (newest)
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.7.0';
+const VERSION = '2.7.1';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -849,6 +849,14 @@ function ensureGitignore() {
 }
 
 function cmdInit() {
+  // Memory is per-project: init writes .ai/memory/ into the CURRENT directory.
+  // Guard the common mistake of running it inside the Code Recall tool folder.
+  if (path.resolve(CWD) === path.resolve(__dirname)) {
+    console.log('⚠ You are inside the Code Recall tool folder itself.');
+    console.log('  Memory is PER-PROJECT — cd into the project you want to track, then run init there.');
+    console.log('  Continuing anyway (safe to ignore if this is intentional).');
+    console.log('');
+  }
   ensureDir(ARCHIVE_DIR);
   const created = [];
   const skipped = [];
@@ -869,7 +877,7 @@ function cmdInit() {
   const claudeResult = ensureClaudeStub();
   const gitignoreResult = ensureGitignore();
 
-  console.log('coderecall init complete.');
+  console.log('coderecall init complete — this project now has a decision log at .ai/memory/ (per-project, lives in THIS repo).');
   if (created.length) console.log('  created: ' + created.join(', '));
   if (skipped.length) console.log('  kept existing: ' + skipped.join(', '));
   console.log('  AGENTS.md marker section: ' + agentsResult);
@@ -878,9 +886,11 @@ function cmdInit() {
   console.log('');
   console.log('Git policy: DECISIONS.md / LESSONS.md travel with the repo; TASK.md / sessions.md');
   console.log('stay local (per-developer). Edit the .gitignore block to change this.');
-  console.log('Next step (once per machine): run install.ps1 (Windows) or install.sh');
-  console.log('to register the Claude Code hooks in ~/.claude/settings.json.');
-  console.log('Optional: node coderecall.js sync --all  (stubs for Cursor/Windsurf/Cline/Roo/Copilot/Gemini)');
+  console.log('');
+  console.log('Model: run `coderecall init` inside EACH project you want tracked (memory is per-project).');
+  console.log('The tool + Claude Code hooks are installed ONCE per machine: `npm i -g coderecall` (or `npm link`');
+  console.log('from the source folder), then install.ps1 / install.sh to register the hooks.');
+  console.log('Optional: coderecall sync --all  (stubs for Cursor/Windsurf/Cline/Roo/Copilot/Gemini)');
 }
 
 function cmdSync(all) {
@@ -2440,6 +2450,9 @@ function main() {
     case '--help':
     case 'help':
       console.log(usage);
+      console.log('');
+      console.log('Memory is per-project: run `init` inside each project you want tracked (creates ./.ai/memory/).');
+      console.log('Install the tool + Claude Code hooks once per machine: `npm i -g coderecall` (or `npm link`), then install.ps1 / install.sh.');
       return;
     default:
       fail('unknown command "' + cmd + '". ' + usage);
