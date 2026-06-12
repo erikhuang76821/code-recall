@@ -106,3 +106,19 @@ UserPromptSubmit reminder is opt-in (installers don't register it) because token
 **Context:** reviewers kept asking for evidence; a faked agent benchmark would be worse than none
 **Decision:** ship bench/bench.js (real-CLI, deterministic: tokens/stale%/search-hits, naive vs Code Recall) + bench/README.md live-agent protocol; graduate now emits docs/adr/NNNN ADR files
 **Consequences:** honest, reproducible, zero-dep; task-success claims require a live agent we do not fake; ADR output is the north-star BRIDGE
+
+## Auto-memory boundary rule injected into init template
+- date: 2026-06-12
+- status: accepted
+- confidence: med
+**Context:** Platform auto-memory (Claude/Gemini/Cursor/Cline) duplicates decisions and lessons already in .ai/memory/, breaking SSOT across any project using coderecall.
+**Decision:** Add rule 6 to templates/AGENTS-section.md: ledger is SSOT, auto-memory only for positioning/cross-project context/tool quirks. Three-way reviewed (Claude 4.6 + Gemini 3.1 Pro + Codex GPT […]
+**Consequences:** Every future coderecall init complete — this project now has a decision log at .ai/memory/ (per-project, lives in THIS repo).   kept existing: .ai\memory\TASK.md, .ai\memory\DECISION […]
+
+## SessionStart digest trimmed ~13% via single fence + tiered protocol
+- date: 2026-06-12
+- status: accepted
+- confidence: high
+**Context:** The digest is injected every startup/resume (gametest: ~360 tokens × 6/session). Audit showed ~55% was fixed boilerplate, not signal — chiefly a 4-pair fence-marker scaffold and a 67-token Protocol line duplicated verbatim from the AGENTS.md section.
+**Decision:** (1) Merge all ledger sections into ONE untrusted-data fence (was 4 pairs); injection boundary is unchanged because the real guard is neutralizeLedger() stripping forged markers, not the count of fences. (2) Tier the Protocol line: full version only on compact (post-amnesia re-anchor), a terse-but-filenamed version (TASK.md/DECISIONS.md/LESSONS.md) on normal startup/resume. Terse line KEEPS the write-back file targets — a tool that doesn't auto-load AGENTS.md must still know WHERE to write (honor-system write-back is the #1 project risk).
+**Consequences:** startup/resume 359→313 tokens (−12.8%); compact unchanged (full re-anchor preserved); 26/26 selftest green; zero content-signal loss. Three-way adversarially reviewed (Claude Opus 4.8 + Codex + Gemini): Codex caught the protocol-omission risk in the first cut; Gemini caught the dropped filenames in the fix; Claude refuted Codex's fence-weakening claim (headers were always inside the fence) and Gemini's PEM-sanitize "regression" (pre-existing, per-field sanitize unchanged). Latent (not introduced here): per-field sanitize() resets PEM state between GOAL/NOW/NEXT — low risk since each is a single line.
