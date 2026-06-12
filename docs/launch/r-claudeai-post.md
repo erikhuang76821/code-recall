@@ -42,22 +42,33 @@ solved it some other way?** MIT, link in comments if anyone wants to try it.
   wants (does the pain resonate, how do others solve it). Link in comments (Reddit
   norm; a bare link in the body gets suppressed).
 
-## Demo GIF spec (author records; ~20s, silent, terminal capture → GIF)
+## Demo (reproducible)
+
+`node docs/launch/demo.js` prints the three-panel screenplay below. PANEL 3b is
+the REAL output of `coderecall digest --compact` (what the SessionStart hook
+injects after a compaction) — nothing is faked. Record that terminal for the
+~20s GIF.
 
 ```
-[0-4s]   a long session in progress (show TASK.md GOAL/NOW/NEXT)
-[4-8s]   trigger / simulate a compaction (context being compacted on screen)
-[8-14s]  new session starts → SessionStart hook injects the digest, the agent's
-         first line correctly resumes NOW/NEXT (no re-asking, no re-walking)
-[14-20s] side-by-side / caption: without Code Recall, the agent asks "what were
-         we doing?" from scratch
+PANEL 1  mid-task, hour 2: GOAL / NOW / NEXT + "already decided: JWT" + blocker
+PANEL 2  💥 the context window compacts — the chat's "why" is summarized away
+PANEL 3a WITHOUT: agent re-opens the settled JWT question, forgets the blocker
+PANEL 3b WITH:    real digest --compact re-anchors GOAL/NOW/NEXT, the JWT
+                  decision, and the mobile blocker — on sight
 ```
 
-Caption: **"Same compaction. Left: agent re-derives from scratch. Right: re-anchors from the ledger."**
+Caption: **"Same compaction. Left: re-derives from scratch. Right: re-anchors from the ledger."**
+
+**Honesty note (so a skeptic can't dunk on it):** the injected digest carries
+GOAL/NOW/NEXT, the *current decision titles*, and *blocked items* inline, plus a
+count of lessons and a pointer to the ledger — it does NOT inline full LESSONS
+text. The contrast in the demo rests only on what is literally injected (the JWT
+decision + the blocker), not on anything the digest merely references.
 
 ## Pre-publish checklist
 
-- [ ] Demo GIF recorded and embedded.
-- [ ] README hero matches the hook (done: "your coding agent forgets *why*").
+- [x] Reproducible demo script exists (`docs/launch/demo.js`) with real CLI output.
+- [x] README hero matches the hook ("your coding agent forgets *why*").
+- [ ] Demo GIF recorded from `demo.js` and embedded.
 - [ ] Author approves going live.
 - [ ] After posting: log responses + any installs as adoption signals (Gate 1).
