@@ -4,16 +4,16 @@
 
 <p align="center"><a href="README.md">English</a> · <b>繁體中文</b></p>
 
-# 🌟 Code Recall — 你的 coding agent 的決策日誌
+# 🌟 Code Recall — 你的 coding agent 會忘記*為什麼*
 
-> 記住**為什麼這樣做、哪些路走不通、現在什麼還算數**——跨 context 壓縮、跨 session、跨工具保存。
+> 長 session 跑到一半,context 視窗一壓縮——agent 就重開你一小時前拍板的決定、重走你已排除的死路,有時甚至**把剛寫的 code 反過來重寫**。理由本來在對話裡,壓縮把它吃掉了。Code Recall 讓它在**每次重置時都擺在 agent 面前**——而不是指望模型自己想起來。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml/badge.svg)](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-2.7-orange.svg)](ROADMAP.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-Code Recall 是 AI 輔助開發的「**決策持久化層**」(Decision Persistence Layer)。它保存專案最容易弄丟、也最難重建的東西——**為什麼當初這樣做，以及哪些路已被證明走不通**——由 AI 自動維護、本地、零依賴，靠生命週期 Hook 撐過 context 壓縮、不腐爛。不是記憶資料庫，不是治理平台，而是「**決策的 Git**」。
+Code Recall 是給 AI coding agent 的一個極輕量**本地決策 ledger**。它保存專案最容易弄丟、也最難重建的東西——**為什麼當初這樣做、哪些路已被證明走不通**——用純 Markdown 存,並由 SessionStart/PreCompact hook 在 **context 消失的那一刻把它重新注入到 agent 面前**(session 啟動、resume、壓縮前)。不是記憶資料庫,不上雲,不是治理平台。零依賴、留在 repo 裡,Claude Code / Cursor / Gemini CLI 同一套設定。就是「**撐過 compaction 的決策版 Git**」。
 
 **需求 / Requirements** · Node ≥ 10.12（2018 年後即可；CI 實測 Node 18 / 20 × Linux / Windows）。
 

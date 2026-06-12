@@ -4,16 +4,16 @@
 
 <p align="center"><b>English</b> · <a href="README.zh-TW.md">繁體中文</a></p>
 
-# 🌟 Code Recall — your coding agent's decision log
+# 🌟 Code Recall — your coding agent forgets *why*
 
-> Remember *why* you built it this way, *what* didn't work, and *what's still current* — kept across context compaction.
+> Long session, the context window compacts — and your agent re-opens a decision you settled an hour ago, re-walks a dead end you already ruled out, sometimes **rewrites code it just wrote the opposite way**. The chat had the reasoning; compaction ate it. Code Recall keeps it **in front of the agent at every reset** — instead of hoping the model recalls it.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml/badge.svg)](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-2.7-orange.svg)](ROADMAP.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-Code Recall is the **Decision Persistence Layer** for AI coding agents. It preserves the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — AI-maintained, local, zero-dependency, and kept from rotting across context compaction. Not a memory database; not a governance platform. Think **"Git for decisions."**
+Code Recall is a tiny **local decision ledger** for AI coding agents. It holds the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — in plain Markdown, and a SessionStart/PreCompact hook **re-injects it in front of the agent the moment context is lost** (session start, resume, before compaction). Not a memory database; not the cloud; not a governance platform. Zero dependencies, stays in the repo, the same setup across **Claude Code / Cursor / Gemini CLI**. Think **"Git for decisions" that survives compaction.**
 
 **Requirements** · Node ≥ 10.12 (anything since 2018; CI runs Node 18 / 20 × Linux / Windows).
 
