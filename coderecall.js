@@ -1009,6 +1009,44 @@ function cmdStatus() {
   console.log('Working-state score: ' + scoreWorkingState().overall + '/100  (node coderecall.js score for detail)');
 }
 
+// `coderecall check` (write-back primitive ③): a read-only report of the gap
+// between the ledger's working state and what the repo has actually done since
+// UPDATED. Advisory by default (exit 0); `--strict` exits 1 when stale, for a
+// CI / pre-push gate. Reuses ledgerStale() for the verdict so this CLI and the
+// SessionStart digest can never disagree.
+function cmdCheck(strict) {
+  requireLedger();
+  const taskText = readFileSafe(TASK_FILE);
+  if (taskText === null) fail('TASK.md missing. Run: node coderecall.js init');
+  const t = parseTask(taskText);
+  const verdict = ledgerStale(t);
+  const age = taskAgeHours(t);
+
+  console.log('coderecall check — write-back status');
+  console.log('  ledger UPDATED: ' + (t.updated || '(none)') + (age !== null ? '  (' + age.toFixed(1) + 'h ago)' : ''));
+  if (gitOut(['rev-parse', '--is-inside-work-tree']) === 'true') {
+    const srcPathspec = ['.', ':!.ai/memory'];
+    if (t.updated && !isNaN(Date.parse(t.updated))) {
+      const log = gitOut(['log', '--since=' + t.updated, '--format=%h', '--'].concat(srcPathspec));
+      if (log !== null) console.log('  source commits since UPDATED: ' + (log === '' ? 0 : log.split('\n').length));
+    }
+    const dirty = gitOut(['status', '--porcelain', '--'].concat(srcPathspec));
+    if (dirty !== null) console.log('  uncommitted source files: ' + (dirty === '' ? 0 : dirty.split('\n').filter(Boolean).length));
+  } else {
+    console.log('  (not a git work tree — staleness falls back to the ' + STALE_HOURS + 'h clock)');
+  }
+  console.log('  verdict: ' + (verdict.stale ? 'STALE — ' + verdict.reason : 'fresh — ' + verdict.reason));
+  console.log('');
+  console.log('  NOW:  ' + (t.now || '(not set)'));
+  console.log('  NEXT: ' + (t.next || '(not set)'));
+  if (verdict.stale) {
+    console.log('');
+    console.log('  → The repo moved past the ledger. Update .ai/memory/TASK.md (NOW:/NEXT: + checklist),');
+    console.log('    record any decision in DECISIONS.md, then re-run check.');
+  }
+  if (strict && verdict.stale) process.exit(1);
+}
+
 // ---------------------------------------------------------------------------
 // Working-state score — is the ledger actually telling an agent what to do?
 //
@@ -2064,6 +2102,16 @@ function cmdSelftest() {
       check('git: quiet repo + fresh ledger not flagged', !/Ledger may be stale/.test(gdigest()));
     } catch (e) { /* git unavailable — skip evidence-path checks, don't fail the suite */ }
 
+    // --- write-back primitive ③: `coderecall check` (advisory; --strict gates) ---
+    check('check: fresh ledger reports fresh', /verdict: fresh/.test(run(['check'])));
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      taskFixture.replace(/UPDATED: .*/, 'UPDATED: ' + nowIso(new Date(Date.now() - 5 * 3600000))), 'utf8');
+    check('check: stale ledger reports STALE', /verdict: STALE/.test(run(['check'])));
+    let strictExit = 0;
+    try { run(['check', '--strict']); } catch (e) { strictExit = e.status || 1; }
+    check('check --strict exits non-zero when stale', strictExit !== 0);
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore fresh fixture
+
     // Drive the ACTUAL hook entry points (what Claude Code executes), not just
     // buildDigest — proves the injection/snapshot path works end to end.
     const runHook = (hookFile, input) => cp.execFileSync(process.execPath, [path.join(__dirname, 'hooks', hookFile)], {
@@ -2475,11 +2523,12 @@ function cmdMcp() {
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
-  const usage = 'usage: node coderecall.js <init|sync [--all]|status|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|decision "<title>" [--context/--decision/--consequences/--status/--confidence]|mcp|score [--json]|selftest|version>';
+  const usage = 'usage: node coderecall.js <init|sync [--all]|status|check [--strict]|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|decision "<title>" [--context/--decision/--consequences/--status/--confidence]|mcp|score [--json]|selftest|version>';
   switch (cmd) {
     case 'init': return cmdInit();
     case 'sync': return cmdSync(args.includes('--all'));
     case 'status': return cmdStatus();
+    case 'check': return cmdCheck(args.includes('--strict'));
     case 'doctor':
       if (args.includes('--selftest')) { cmdDoctor(); console.log(''); cmdSelftest(); return; }
       return cmdDoctor();
