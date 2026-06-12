@@ -44,7 +44,7 @@ function run(cwd, args) {
   return cp.execFileSync(process.execPath, [CLI].concat(args), { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-function main() {
+function benchHygiene() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'coderecall-bench-'));
   try {
     run(tmp, ['init']);
@@ -92,5 +92,76 @@ function main() {
   } finally {
     try { fs.rmSync ? fs.rmSync(tmp, { recursive: true, force: true }) : fs.rmdirSync(tmp, { recursive: true }); } catch (e) { /* best effort */ }
   }
+}
+
+// Write-back trustworthiness: does the tool make write-back GAPS visible? We run
+// the real CLI against a synthetic git history and count how many commits that
+// advanced past the ledger get surfaced as STALE. Deterministic by design — we
+// commit the init artifacts first so the work tree is clean, making each verdict
+// depend ONLY on "newest source commit vs ledger UPDATED" (never the wall clock).
+function benchWriteBack() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'coderecall-wb-'));
+  try {
+    const G = (a, dateIso) => cp.execFileSync('git', a, {
+      cwd: tmp, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+      env: dateIso ? Object.assign({}, process.env, { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso }) : process.env,
+    });
+    try { G(['init']); G(['config', 'user.email', 'b@b']); G(['config', 'user.name', 'bench']); }
+    catch (e) { console.log('Write-back benchmark skipped: git unavailable.'); return; }
+    run(tmp, ['init']);
+
+    const base = new Date('2026-06-01T09:00:00Z');
+    const isoAt = (ms) => new Date(base.getTime() + ms).toISOString();
+    const H = 3600000;
+    const taskPath = path.join(tmp, '.ai', 'memory', 'TASK.md');
+    const setUpdated = (iso) => fs.writeFileSync(taskPath, fs.readFileSync(taskPath, 'utf8').replace(/UPDATED: .*/, 'UPDATED: ' + iso), 'utf8');
+    const isStale = () => /verdict: STALE/.test(run(tmp, ['check']));
+
+    // Commit the scaffold (AGENTS.md/CLAUDE.md/.gitignore) so the tree is clean;
+    // TASK.md is gitignored, so it stays out. Anchor the ledger at base.
+    G(['add', '-A']); G(['commit', '-m', 'chore: scaffold'], isoAt(0));
+    setUpdated(isoAt(0));
+
+    // A session of work steps. `true` = developer refreshed the ledger after the
+    // commit (disciplined); `false` = skipped it (a real write-back gap).
+    const disciplined = [true, false, true, false, false, true];
+    let gaps = 0, surfaced = 0, falseAlarms = 0;
+    disciplined.forEach((disc, i) => {
+      const commitMs = (i + 1) * H;
+      fs.writeFileSync(path.join(tmp, 'src' + i + '.js'), 'module.exports = ' + i + '\n', 'utf8');
+      G(['add', 'src' + i + '.js']); G(['commit', '-m', 'feat: step ' + i], isoAt(commitMs));
+      if (disc) setUpdated(isoAt(commitMs + 60000)); // refresh ledger just after the commit
+      const stale = isStale();
+      if (disc) { if (stale) falseAlarms++; }
+      else { gaps++; if (stale) surfaced++; }
+    });
+
+    const K = disciplined.length, M = disciplined.filter(Boolean).length;
+    const rate = Math.round((surfaced / Math.max(1, gaps)) * 100);
+    console.log('Code Recall — write-back trustworthiness benchmark (deterministic)');
+    console.log('Simulated session: ' + K + ' source commits, ' + M + ' with the ledger refreshed, ' + (K - M) + ' skipped.');
+    console.log('');
+    console.log('  metric                              no write-back tooling   Code Recall');
+    console.log('  ----------------------------------  ---------------------   -----------');
+    console.log('  write-back gaps in the session      ' + String(gaps).padEnd(20) + '  ' + gaps);
+    console.log('  gaps surfaced (made visible)        ' + '0 (silent)'.padEnd(20) + '  ' + surfaced + ' (' + rate + '%)');
+    console.log('  false alarms on refreshed commits   ' + 'n/a'.padEnd(20) + '  ' + falseAlarms);
+    console.log('');
+    console.log('Reading: without tooling, the ' + gaps + ' commits that advanced past the ledger are a SILENT failure');
+    console.log('— the next session re-anchors to stale NOW:/NEXT:. Code Recall surfaces ' + rate + '% of them at the commit');
+    console.log('checkpoint (and at SessionStart), with ' + falseAlarms + ' false alarms on the commits where the ledger was kept fresh.');
+    console.log('');
+    console.log('HONEST SCOPE: this measures DETECTION of write-back gaps (the mechanism coderecall adds),');
+    console.log('NOT whether a developer acts on the nudge. The value is turning a previously-invisible');
+    console.log('failure into a visible, evidence-based signal.');
+  } finally {
+    try { fs.rmSync ? fs.rmSync(tmp, { recursive: true, force: true }) : fs.rmdirSync(tmp, { recursive: true }); } catch (e) { /* best effort */ }
+  }
+}
+
+function main() {
+  benchHygiene();
+  console.log('\n' + '='.repeat(72) + '\n');
+  benchWriteBack();
 }
 main();

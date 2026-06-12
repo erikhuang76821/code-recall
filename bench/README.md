@@ -1,6 +1,6 @@
 # Code Recall — benchmarks
 
-Two layers, kept deliberately separate so we never pass one off as the other.
+Three sections, kept deliberately separate so we never pass one off as the other: two deterministic (runnable now) and one live-agent protocol.
 
 ## 1. Context-hygiene benchmark (deterministic, runnable now)
 
@@ -31,7 +31,31 @@ real, reproducible numbers about *context hygiene* — the "influence rot" and
 tasks, or repeats fewer dead-ends. That depends on the model and the task and
 **cannot be measured without a live agent**. See below.
 
-## 2. Live-agent benchmark (protocol — bring your own agent)
+## 2. Write-back trustworthiness benchmark (deterministic, runnable now)
+
+Same `node bench/bench.js` run, second section. The decision log is only useful
+if write-back actually happens (the project's stated #1 risk). This measures
+whether Code Recall makes write-back **gaps visible**: it drives the real CLI
+over a synthetic git history where some commits advance the source past the
+ledger's `UPDATED` and some keep it fresh, then counts how many gaps the
+evidence-based `check` surfaces.
+
+It is deterministic by construction — the scaffold is committed first so the
+work tree is clean, making every verdict depend only on *newest source commit
+vs ledger UPDATED*, never the wall clock. Example output (6 commits, 3 skipped):
+
+| metric | no write-back tooling | Code Recall |
+|---|---|---|
+| write-back gaps in the session | 3 | 3 |
+| gaps surfaced (made visible) | 0 (silent) | 3 (100%) |
+| false alarms on refreshed commits | n/a | 0 |
+
+**What this does NOT claim:** that a developer *acts* on the nudge. It measures
+DETECTION — turning a previously-invisible failure (the ledger silently falling
+behind) into a visible, evidence-based signal. Whether that changes behavior is
+a live-agent question.
+
+## 3. Live-agent benchmark (protocol — bring your own agent)
 
 We do not ship faked agent numbers. To measure task-level value honestly, run a
 controlled A/B with a real coding agent and **publish the raw transcripts**:
