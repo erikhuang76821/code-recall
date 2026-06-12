@@ -325,6 +325,38 @@ function heartbeatStale() {
   return hb !== null && /^STALE\b/m.test(hb.replace(/\r\n/g, '\n'));
 }
 
+// Evidence-based staleness (write-back primitive ①). Asks the real question —
+// "has the repo's SOURCE advanced past the ledger's UPDATED stamp?" — instead of
+// the old pure-clock proxy (age > 2h), which both false-flags a quiet repo and
+// false-clears a busy one. Returns { stale, reason }.
+//
+// When CWD is a git work tree we trust git evidence and DELIBERATELY ignore the
+// clock: a ledger touched 3h ago in an untouched repo is NOT stale (the false
+// positive the clock produced). Outside git, we keep the legacy clock behavior
+// so non-git projects are unaffected. All git calls are best-effort (gitOut
+// returns null on any failure) so this never throws and never blocks a hook.
+function ledgerStale(t) {
+  if (heartbeatStale()) return { stale: true, reason: 'heartbeat flag' };
+  const age = taskAgeHours(t);
+  const updatedMs = t && t.updated ? Date.parse(t.updated) : NaN;
+  if (gitOut(['rev-parse', '--is-inside-work-tree']) === 'true') {
+    // Exclude the ledger itself so a ledger-only commit never reads as "source moved".
+    const srcPathspec = ['.', ':!.ai/memory'];
+    const lastSrcCommit = gitOut(['log', '-1', '--format=%cI', '--'].concat(srcPathspec));
+    if (lastSrcCommit && !isNaN(updatedMs) && Date.parse(lastSrcCommit) > updatedMs) {
+      return { stale: true, reason: 'source committed after ledger UPDATED' };
+    }
+    const dirtySrc = (gitOut(['status', '--porcelain', '--'].concat(srcPathspec)) || '') !== '';
+    if (dirtySrc && (age === null || age > STALE_HOURS)) {
+      return { stale: true, reason: 'uncommitted source changes; ledger not refreshed' };
+    }
+    return { stale: false, reason: 'git-quiet' }; // git available + quiet → trust it over the clock
+  }
+  // No git signal → legacy clock behavior (back-compat for non-git projects).
+  if (age !== null && age > STALE_HOURS) return { stale: true, reason: age.toFixed(1) + 'h old' };
+  return { stale: false, reason: 'fresh' };
+}
+
 // ---------------------------------------------------------------------------
 // DECISIONS / LESSONS entry parsing + dedupe-on-write
 // ---------------------------------------------------------------------------
@@ -625,9 +657,10 @@ function buildDigest(opts) {
   }
   lines.push('Open items: ' + t.counts.todo + ' todo, ' + t.counts.doing + ' doing, ' + t.counts.blocked +
     ' blocked. Lessons on file: ' + lessonsCount + '.');
-  // Stale trigger (exact contract): heartbeat STALE flag OR UPDATED age > 2h.
-  const age = taskAgeHours(t);
-  if (heartbeatStale() || (age !== null && age > STALE_HOURS)) {
+  // Stale trigger: evidence-based (source moved past the ledger), falling back to
+  // the clock outside git. See ledgerStale(). Reuses the same one-line surface —
+  // zero added SessionStart tokens, but the line now means "code actually advanced".
+  if (ledgerStale(t).stale) {
     lines.push('Ledger may be stale — verify before trusting.');
   }
   // Protocol reminder. The full rules live in the AGENTS.md section, but we must
@@ -974,6 +1007,44 @@ function cmdStatus() {
   console.log('AGENTS.md marker section: ' + driftMsg);
   console.log('');
   console.log('Working-state score: ' + scoreWorkingState().overall + '/100  (node coderecall.js score for detail)');
+}
+
+// `coderecall check` (write-back primitive ③): a read-only report of the gap
+// between the ledger's working state and what the repo has actually done since
+// UPDATED. Advisory by default (exit 0); `--strict` exits 1 when stale, for a
+// CI / pre-push gate. Reuses ledgerStale() for the verdict so this CLI and the
+// SessionStart digest can never disagree.
+function cmdCheck(strict) {
+  requireLedger();
+  const taskText = readFileSafe(TASK_FILE);
+  if (taskText === null) fail('TASK.md missing. Run: node coderecall.js init');
+  const t = parseTask(taskText);
+  const verdict = ledgerStale(t);
+  const age = taskAgeHours(t);
+
+  console.log('coderecall check — write-back status');
+  console.log('  ledger UPDATED: ' + (t.updated || '(none)') + (age !== null ? '  (' + age.toFixed(1) + 'h ago)' : ''));
+  if (gitOut(['rev-parse', '--is-inside-work-tree']) === 'true') {
+    const srcPathspec = ['.', ':!.ai/memory'];
+    if (t.updated && !isNaN(Date.parse(t.updated))) {
+      const log = gitOut(['log', '--since=' + t.updated, '--format=%h', '--'].concat(srcPathspec));
+      if (log !== null) console.log('  source commits since UPDATED: ' + (log === '' ? 0 : log.split('\n').length));
+    }
+    const dirty = gitOut(['status', '--porcelain', '--'].concat(srcPathspec));
+    if (dirty !== null) console.log('  uncommitted source files: ' + (dirty === '' ? 0 : dirty.split('\n').filter(Boolean).length));
+  } else {
+    console.log('  (not a git work tree — staleness falls back to the ' + STALE_HOURS + 'h clock)');
+  }
+  console.log('  verdict: ' + (verdict.stale ? 'STALE — ' + verdict.reason : 'fresh — ' + verdict.reason));
+  console.log('');
+  console.log('  NOW:  ' + (t.now || '(not set)'));
+  console.log('  NEXT: ' + (t.next || '(not set)'));
+  if (verdict.stale) {
+    console.log('');
+    console.log('  → The repo moved past the ledger. Update .ai/memory/TASK.md (NOW:/NEXT: + checklist),');
+    console.log('    record any decision in DECISIONS.md, then re-run check.');
+  }
+  if (strict && verdict.stale) process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -1998,12 +2069,48 @@ function cmdSelftest() {
     check('plain digest has NOW', /NOW: wiring stage 2/.test(plain));
     check('plain digest reports blocked item', /Blocked: .*stage 3 blocked/.test(plain));
     check('plain digest does NOT re-anchor', !/Context was just compacted/.test(plain));
+    check('fresh ledger: no stale flag', !/Ledger may be stale/.test(plain));
 
     const compact = run(['digest', '--compact']);
     check('compact digest re-anchors', /Context was just compacted\. Re-anchor/.test(compact));
     check('compact digest embeds full TASK body', /--- Full TASK\.md ---/.test(compact));
     check('compact digest carries NEXT verbatim', /NEXT: add backpressure to stage 3/.test(compact));
     check('compact digest keeps untrusted fence', /UNTRUSTED-LEDGER-DATA:BEGIN/.test(compact));
+
+    // --- write-back primitive ①: evidence-based staleness ---
+    // Clock fallback (tmp is not a git repo): an old UPDATED must flag stale.
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      taskFixture.replace(/UPDATED: .*/, 'UPDATED: ' + nowIso(new Date(Date.now() - 5 * 3600000))), 'utf8');
+    check('old ledger (no git) flags stale', /Ledger may be stale/.test(run(['digest'])));
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore fresh fixture
+    // Git-evidence path (best-effort; skipped if git is unavailable/sandboxed):
+    // a source commit dated AFTER the ledger's UPDATED must flag stale even though
+    // the clock alone would call it fresh; a quiet repo with a fresh ledger must not.
+    try {
+      const gtmp = fs.mkdtempSync(path.join(os.tmpdir(), 'coderecall-git-'));
+      const git = (a) => cp.execFileSync('git', a, { cwd: gtmp, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      git(['init']); git(['config', 'user.email', 't@t']); git(['config', 'user.name', 't']);
+      cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: gtmp, stdio: 'ignore' });
+      const gdigest = () => cp.execFileSync(process.execPath, [__filename, 'digest'], { cwd: gtmp, encoding: 'utf8' });
+      const setUpdated = (iso) => fs.writeFileSync(path.join(gtmp, '.ai', 'memory', 'TASK.md'),
+        taskFixture.replace(/UPDATED: .*/, 'UPDATED: ' + iso), 'utf8');
+      setUpdated(nowIso(new Date(Date.now() - 6 * 3600000)));      // ledger 6h in the past
+      fs.writeFileSync(path.join(gtmp, 'app.js'), 'console.log(1)\n', 'utf8');
+      git(['add', 'app.js']); git(['commit', '-m', 'feat: source after ledger']);
+      check('git: source committed after UPDATED flags stale', /Ledger may be stale/.test(gdigest()));
+      setUpdated(nowIso());                                        // refresh ledger; repo now quiet
+      check('git: quiet repo + fresh ledger not flagged', !/Ledger may be stale/.test(gdigest()));
+    } catch (e) { /* git unavailable — skip evidence-path checks, don't fail the suite */ }
+
+    // --- write-back primitive ③: `coderecall check` (advisory; --strict gates) ---
+    check('check: fresh ledger reports fresh', /verdict: fresh/.test(run(['check'])));
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      taskFixture.replace(/UPDATED: .*/, 'UPDATED: ' + nowIso(new Date(Date.now() - 5 * 3600000))), 'utf8');
+    check('check: stale ledger reports STALE', /verdict: STALE/.test(run(['check'])));
+    let strictExit = 0;
+    try { run(['check', '--strict']); } catch (e) { strictExit = e.status || 1; }
+    check('check --strict exits non-zero when stale', strictExit !== 0);
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore fresh fixture
 
     // Drive the ACTUAL hook entry points (what Claude Code executes), not just
     // buildDigest — proves the injection/snapshot path works end to end.
@@ -2416,11 +2523,12 @@ function cmdMcp() {
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
-  const usage = 'usage: node coderecall.js <init|sync [--all]|status|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|decision "<title>" [--context/--decision/--consequences/--status/--confidence]|mcp|score [--json]|selftest|version>';
+  const usage = 'usage: node coderecall.js <init|sync [--all]|status|check [--strict]|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|decision "<title>" [--context/--decision/--consequences/--status/--confidence]|mcp|score [--json]|selftest|version>';
   switch (cmd) {
     case 'init': return cmdInit();
     case 'sync': return cmdSync(args.includes('--all'));
     case 'status': return cmdStatus();
+    case 'check': return cmdCheck(args.includes('--strict'));
     case 'doctor':
       if (args.includes('--selftest')) { cmdDoctor(); console.log(''); cmdSelftest(); return; }
       return cmdDoctor();
