@@ -1921,6 +1921,18 @@ function cmdPrecommit(strict) {
     if (src.length && !decisionStaged) {
       console.log('  note: ' + src.length + ' source file(s) staged, no decision recorded — `coderecall decision "…"` if this commit was a choice worth keeping.');
     }
+    // Write-back nudge (primitive ②): committing source while the working-state
+    // ledger looks behind. TASK.md is gitignored (local working state), so it
+    // never shows in --cached — gate on ledgerStale() instead. That gate is
+    // self-quieting: a TASK.md refreshed within STALE_HOURS does NOT fire, so
+    // this only nudges when the ledger demonstrably fell behind (commit after
+    // UPDATED, or uncommitted work + a stale clock). Advisory, never blocks.
+    if (src.length) {
+      const tNow = parseTask(readFileSafe(TASK_FILE) || '');
+      if (tNow && ledgerStale(tNow).stale) {
+        console.log('  note: source staged but .ai/memory/TASK.md looks behind — refresh NOW:/NEXT: so the next session (and any teammate agent) re-anchors to current reality.');
+      }
+    }
   } catch (e) { /* best effort — never break the commit */ }
   if (issues.length === 0) {
     console.log('  lint: clean.');
@@ -2111,6 +2123,23 @@ function cmdSelftest() {
     try { run(['check', '--strict']); } catch (e) { strictExit = e.status || 1; }
     check('check --strict exits non-zero when stale', strictExit !== 0);
     fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore fresh fixture
+
+    // --- write-back primitive ②: pre-commit write-back nudge (best-effort git) ---
+    try {
+      const ptmp = fs.mkdtempSync(path.join(os.tmpdir(), 'coderecall-pc-'));
+      const pgit = (a) => cp.execFileSync('git', a, { cwd: ptmp, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      pgit(['init']); pgit(['config', 'user.email', 't@t']); pgit(['config', 'user.name', 't']);
+      cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: ptmp, stdio: 'ignore' });
+      const pc = () => cp.execFileSync(process.execPath, [__filename, 'precommit'], { cwd: ptmp, encoding: 'utf8' });
+      const setPUpdated = (iso) => fs.writeFileSync(path.join(ptmp, '.ai', 'memory', 'TASK.md'),
+        taskFixture.replace(/UPDATED: .*/, 'UPDATED: ' + iso), 'utf8');
+      fs.writeFileSync(path.join(ptmp, 'app.js'), 'console.log(1)\n', 'utf8');
+      pgit(['add', 'app.js']);
+      setPUpdated(nowIso(new Date(Date.now() - 5 * 3600000)));     // ledger behind + staged source
+      check('precommit: stale ledger + staged source nudges write-back', /TASK\.md looks behind/.test(pc()));
+      setPUpdated(nowIso());                                       // ledger fresh → self-quieting, no nudge
+      check('precommit: fresh ledger does not nudge write-back', !/TASK\.md looks behind/.test(pc()));
+    } catch (e) { /* git unavailable — skip nudge checks, don't fail the suite */ }
 
     // Drive the ACTUAL hook entry points (what Claude Code executes), not just
     // buildDigest — proves the injection/snapshot path works end to end.
