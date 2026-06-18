@@ -27,13 +27,21 @@ Coding is commoditizing. The next differentiator isn't who writes code faster �
 
 ## 🧭 What it fills, and what it does not replace
 
-Claude Code already has `/init` (codebase overview) and `/handoff` (session transfer). It has **no decision log** — that's the gap Code Recall fills.
+Your agent already has several "memory-ish" surfaces — they just answer different questions. Code Recall doesn't replace any of them; it fills the one cell none of them cover: **why a choice was made, and which paths are proven dead ends.** Put side by side:
 
-**Does NOT replace:**
-- `/init` — codebase overview generation
-- `/handoff` — a one-time conversation handoff
-- `CLAUDE.md` / `AGENTS.md` — your standing project instructions (Code Recall lives alongside them)
-- RAG / vector / semantic memory — that's *retrieval*; this is *decision rationale*
+| | `/init` | auto-memory (`MEMORY.md`)\* | rules (`CLAUDE.md` / `AGENTS.md`) | `/handoff` | **Code Recall** |
+|---|---|---|---|---|---|
+| **Answers** | what the code *is* | cross-project / machine notes | the standing *rules* | where *this chat* got to | **why it was decided + which paths are dead ends** |
+| **Lifespan** | one-time snapshot | accretes, cross-project | stable, long-lived | one-time | evolves, with a lifecycle |
+| **Trigger** | manual `/init` | harness-managed | read every turn | manual `/handoff` | **auto via hooks** (session start / pre-compaction) |
+| **Scope** | one repo | your machine | one repo | one conversation | one repo (travels with git) |
+| **Travels with the repo** | ✅ (`CLAUDE.md`) | ❌ local-only | ✅ | ❌ | ✅ team-shared |
+| **Survives compaction** | ⚠️ if kept resident | ⚠️ harness-decided | ✅ resident | ❌ one-shot | ✅ **re-injected by design** |
+| **Stale auto-retires** | ❌ rerun by hand | manual | ❌ | n/a | ✅ supersede / expire / archive |
+
+<sub>\* Claude Code's own file-based memory (`~/.claude/.../memory/MEMORY.md`) — a *different layer* from Code Recall. The two are kept deliberately separate (see boundary note below).</sub>
+
+In one line each: `/init` = *what the code is* · rules = *the standing rules* · `/handoff` = *this chat's closing handoff* · auto-memory = *your cross-project/machine notes* · **Code Recall = why it was done this way, which dead ends to avoid, and where the work stands — re-surfaced automatically at every reset.** Also distinct from RAG / vector / semantic memory: that's *retrieval*; this is *decision rationale*.
 
 **Preserves (what projects lose most):**
 - **Decisions & constraints** — why it's the way it is
@@ -41,6 +49,8 @@ Claude Code already has `/init` (codebase overview) and `/handoff` (session tran
 - **Goal & the thread in progress** — where you're mid-work (compaction can't erase it)
 
 …and unlike a doc you'd forget to update, it's re-injected every session, snapshotted before compaction, and expired/superseded decisions auto-retire (ADR status lifecycle).
+
+> **Boundary with auto-memory** · `.ai/memory/` is the single source of truth — decisions, lessons, and working state live there, never duplicated into the harness's auto-memory. Auto-memory holds only what Code Recall deliberately *doesn't*: project positioning, cross-project context, local OS/tool quirks. So the two never record the same fact twice and can't drift apart.
 
 ---
 
@@ -209,21 +219,24 @@ Per-tool truth across the three layers (injection / write-back / compaction surv
 
 Plenty of tools *record* decisions; almost none make **keeping stale decisions from misleading you while keeping current ones influential** their *core*. Most cover only one or two cells:
 
-| Capability | Memory Bank* | llm-wiki / Obsidian | mem0 / supermemory | ADR tools† | **Code Recall** |
-|---|---|---|---|---|---|
-| Easy / low-friction capture | ✅ | ❌ manual | ✅ auto | ❌ manual | ✅ CLI/MCP |
-| Decision status lifecycle (accepted/superseded) | ❌ | ❌ | ❌ | ✅ | ✅ |
-| Stale loses influence (rot governance) | ❌ append-only | ❌ | ⚠️ semantic | ❌ humans read | ✅ filter+weight |
-| Surfacing across compaction | ❌ | ❌ | ❌ | ❌ | ✅ digest |
-| Warn on re-litigation | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Local · zero-dep · no cloud | ✅ | ✅ | ❌ cloud/vector | ✅ | ✅ |
-| AI-maintained | ⚠️ | ❌ | ✅ | ❌ human | ✅ |
+| Capability | Memory Bank* | llm-wiki / Obsidian | mem0 / supermemory | ADR tools† | Knowie‡ | **Code Recall** |
+|---|---|---|---|---|---|---|
+| Easy / low-friction capture | ✅ | ❌ manual | ✅ auto | ❌ manual | ⚠️ `/capture` | ✅ CLI/MCP |
+| Auto-surfaced (no manual call) | ⚠️ varies | ❌ | ✅ | ❌ | ❌ pull | ✅ hooks |
+| Decision status lifecycle (accepted/superseded) | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ |
+| Stale loses influence (rot governance) | ❌ append-only | ❌ | ⚠️ semantic | ❌ humans read | ❌ | ✅ filter+weight |
+| Surfacing across compaction | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ digest |
+| Warn on re-litigation | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Local · zero-dep · no cloud | ✅ | ✅ | ❌ cloud/vector | ✅ | ✅ | ✅ |
+| AI-maintained | ⚠️ | ❌ | ✅ | ❌ human | ⚠️ pull | ✅ |
 
-<sub>\* append-only memory banks like Cline / Roo / Cursor Memories　† human ADR tools like adr-tools / log4brains</sub>
+<sub>\* append-only memory banks like Cline / Roo / Cursor Memories　† human ADR tools like adr-tools / log4brains　‡ [Knowie](https://github.com/timcsy/knowie) — local Markdown knowledge layer, slash-command driven</sub>
 
-ADR tools have a status lifecycle but are human-authored and never surface to the agent or survive compaction. Memory banks auto-capture but have no decision-status lifecycle or influence governance (append-only → rot). Cloud memory (mem0 / supermemory) adds semantic recall but isn't local/zero-dep and has no ADR-style decision lifecycle. **The combination — AI-maintained decision lifecycle + influence governance + compaction surfacing, all local and zero-dependency — is the uncontested gap Code Recall fills.**
+ADR tools have a status lifecycle but are human-authored and never surface to the agent or survive compaction. Memory banks auto-capture but have no decision-status lifecycle or influence governance (append-only → rot). Cloud memory (mem0 / supermemory) adds semantic recall but isn't local/zero-dep and has no ADR-style decision lifecycle.
 
-> **Honest positioning** · We do **not** compete with mem0/supermemory on semantic recall or multi-modality (that's the cloud products' home turf), and we do **not** build a governance/approval engine. Code Recall's moat is "local, zero-dependency, decision lifecycle + surviving compaction." Per-tool reality in [COMPATIBILITY.md](COMPATIBILITY.md); competitive assessment in [ROADMAP.md](ROADMAP.md).
+**The closest neighbor is [Knowie](https://github.com/timcsy/knowie)** — also local, zero-dependency, Markdown, "record the *why*, not retrieval." The dividing line is the **trigger model**: Knowie is **pull** — you invoke `/knowie-capture`, `/knowie-next` in chat, and it deliberately favors human-authored curation; Code Recall is **push** — lifecycle hooks fire at session start and before compaction, so no one has to *remember* to call them ([CI-proven](#-selftest--ci)) — plus a decision-status lifecycle Knowie doesn't carry. In return, Knowie has a vision/principles alignment layer and git-history migration Code Recall doesn't. Different bet, not a worse one. **Code Recall's uncontested cell is the bottom stack: AI-maintained decision lifecycle + influence governance + auto-surfacing across compaction, all local and zero-dependency.**
+
+> **Honest positioning** · We do **not** compete with mem0/supermemory on semantic recall or multi-modality (that's the cloud products' home turf), and we do **not** build a governance/approval engine. Against the nearest local peer: **Knowie waits for you to ask; Code Recall shows up on its own** — hooks fire at session start and before compaction (strongest on Claude Code, where native hooks exist; instruction-driven elsewhere). Code Recall's moat is "local, zero-dependency, decision lifecycle + surviving compaction." Per-tool reality in [COMPATIBILITY.md](COMPATIBILITY.md); competitive assessment in [ROADMAP.md](ROADMAP.md).
 
 ---
 
