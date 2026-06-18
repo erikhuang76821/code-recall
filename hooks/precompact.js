@@ -341,6 +341,17 @@ async function main() {
 
   touchTaskUpdatedLocked();
   rotateSnapshots(archiveDir, 5);
+
+  // Compaction is the natural, low-frequency moment to keep the ledger lean: the
+  // snapshot above already preserved the full pre-compaction state, so now retire
+  // done/superseded/expired entries to archive/ so the post-compact (compact) digest
+  // re-anchors from a trimmed TASK.md. Non-blocking + quiet + does not touch UPDATED;
+  // skips silently if the lock is contended. Never throws (hooks must stay light).
+  try {
+    if (memo && typeof memo.runConsolidateAutoSafe === 'function') memo.runConsolidateAutoSafe();
+  } catch (e) {
+    // best-effort only
+  }
 }
 
 main()
