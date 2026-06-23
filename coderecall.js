@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.7.1.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.8.0.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -54,7 +54,7 @@ const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the d
 const DIGEST_DECISIONS_TOPN = 5;       // current decisions surfaced in the digest (newest)
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.7.1';
+const VERSION = '2.8.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
