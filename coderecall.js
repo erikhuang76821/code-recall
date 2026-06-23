@@ -292,15 +292,34 @@ function sanitize(text, opts) {
 // ---------------------------------------------------------------------------
 // TASK.md parsing
 // ---------------------------------------------------------------------------
+// Match a TASK field label at line start. Accepts the canonical "NOW: x", a
+// full-width colon "NOW：x", a bare "NOW x", OR a bracketed "NOW【tag】x" — the
+// last is a common drift that USED to silently blank the digest (the parser
+// only knew "NOW: ", so a missing colon produced "NOW: (not set)" with no
+// warning — see the LevelTest field audit). The lookahead requires a real
+// delimiter after the label so "NOWHERE"/"NEXTGEN" never match. Returns the
+// trimmed value (may be '') or null when the line is not this field.
+function matchTaskField(line, label) {
+  const re = new RegExp('^' + label + '(?=[:：【\\s]|$)[:：]?\\s*(.*)$');
+  const m = re.exec(line);
+  return m ? m[1].trim() : null;
+}
+
 function parseTask(text) {
-  const t = { goal: '', now: '', next: '', updated: '', counts: { todo: 0, doing: 0, done: 0, blocked: 0 }, lines: [] };
+  const t = { goal: '', now: '', next: '', updated: '', counts: { todo: 0, doing: 0, done: 0, blocked: 0 }, nowLines: 0, nextLines: 0, lines: [] };
   if (text === null || text === undefined) return null;
   t.lines = splitLines(text);
   for (const line of t.lines) {
-    if (line.startsWith('GOAL: ')) t.goal = line.slice(6).trim();
-    else if (line.startsWith('NOW: ')) t.now = line.slice(5).trim();
-    else if (line.startsWith('NEXT: ')) t.next = line.slice(6).trim();
-    else if (line.startsWith('UPDATED: ')) t.updated = line.slice(9).trim();
+    let v;
+    if ((v = matchTaskField(line, 'GOAL')) !== null) t.goal = v;
+    // NOW/NEXT: FIRST occurrence wins (not last). A correctly-maintained file has
+    // exactly one of each, so this is identical there — but the append-drift this
+    // guards against prepends newest-on-top, so first-wins surfaces the MOST recent
+    // state to a re-anchoring agent instead of the oldest. nowLines/nextLines still
+    // count every occurrence so doctor can flag the append (see cmdDoctor).
+    else if ((v = matchTaskField(line, 'NOW')) !== null) { if (!t.nowLines) t.now = v; t.nowLines++; }
+    else if ((v = matchTaskField(line, 'NEXT')) !== null) { if (!t.nextLines) t.next = v; t.nextLines++; }
+    else if ((v = matchTaskField(line, 'UPDATED')) !== null) t.updated = v;
     else {
       // Lenient checklist matcher (allows indentation, no trailing-space
       // requirement). Keep in sync with hooks/sessionstart counting and
@@ -677,6 +696,17 @@ function buildDigest(opts) {
   }
   lines.push(fenceContent);
   lines.push(LEDGER_FENCE_END);
+  // If the agent has a real GOAL but NOW came back empty, the likely cause is a
+  // TASK.md format slip the parser couldn't read (matchTaskField already tolerates
+  // "NOW【…】" / full-width colon, so reaching here means something stranger) — NOT
+  // a deliberately blank state. Say so loudly OUTSIDE the untrusted fence instead of
+  // silently shipping "NOW: (not set)", which strands a re-anchoring agent. A fresh
+  // ledger (GOAL still a <placeholder>) is exempt.
+  const goalIsSet = t.goal && !/^<.*>$/.test(t.goal) && t.goal !== '(not set)';
+  if (goalIsSet && !t.now) {
+    lines.push('[coderecall] WARNING: GOAL is set but NOW: could not be parsed from TASK.md — ' +
+      'likely a format slip (use "NOW: <one line>" with a colon). There is no current-state anchor until this is fixed.');
+  }
   if (opts.compact) {
     // Point the agent at the freshest pre-compaction snapshot (filename is
     // coderecall-generated, so it lives outside the untrusted fence).
@@ -1207,6 +1237,15 @@ function cmdDoctor() {
   if (age === null) warn('TASK.md UPDATED line missing or unparseable');
   else if (age > STALE_HOURS && t.goal && !t.goal.startsWith('<')) warn('TASK.md is ' + age.toFixed(1) + 'h old — ledger may be stale');
   else ok('TASK.md freshness ' + age.toFixed(1) + 'h');
+  // GOAL set but NOW unparseable → the digest has no current-state anchor (the
+  // exact failure that silently stranded LevelTest: "NOW【…】" with no colon).
+  const goalIsSet = t.goal && !/^<.*>$/.test(t.goal) && t.goal !== '(not set)';
+  if (goalIsSet && !t.now) warn('TASK.md GOAL is set but NOW: could not be parsed — check for a missing colon (use "NOW: <one line>"); the digest re-anchor will be empty');
+  // Multiple NOW/NEXT lines ⇒ the file is being APPENDED to, not rewritten in place.
+  // NOW must be the single current state; a log of finished steps belongs in
+  // sessions.md / DECISIONS.md. Left unchecked this grows TASK.md without bound
+  // (LevelTest reached 60KB / 15× the byte budget this way).
+  if (t.nowLines > 1 || t.nextLines > 1) warn('TASK.md has ' + t.nowLines + ' NOW + ' + t.nextLines + ' NEXT lines — rewrite NOW:/NEXT: in place, do not append; move finished-step logs to sessions.md/DECISIONS.md');
 
   // 2. Marker section drift
   console.log('[sync]');
@@ -2151,6 +2190,26 @@ function cmdSelftest() {
     check('compact digest embeds full TASK body', /--- Full TASK\.md ---/.test(compact));
     check('compact digest carries NEXT verbatim', /NEXT: add backpressure to stage 3/.test(compact));
     check('compact digest keeps untrusted fence', /UNTRUSTED-LEDGER-DATA:BEGIN/.test(compact));
+
+    // --- TASK field robustness (LevelTest field audit) ---
+    // (a) Parser tolerates a bracketed "NOW【…】" / missing-colon drift so the
+    //     digest is not silently blanked to "(not set)".
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      ['# TASK', 'GOAL: ship it', 'NOW【wip ✓】wiring stage two', 'NEXT：add backpressure', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
+    const tol = run(['digest']);
+    check('digest tolerates NOW【…】 (no silent (not set))', /NOW: 【wip ✓】wiring stage two/.test(tol) && !/NOW: \(not set\)/.test(tol));
+    check('digest tolerates full-width colon NEXT：', /NEXT: add backpressure/.test(tol));
+    // (b) GOAL set but NOW genuinely absent → loud WARNING, not a silent blank.
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      ['# TASK', 'GOAL: ship it', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
+    check('digest WARNs when GOAL set but NOW unparseable', /WARNING: GOAL is set but NOW: could not be parsed/.test(run(['digest'])));
+    check('doctor WARNs when GOAL set but NOW unparseable', /GOAL is set but NOW: could not be parsed/.test(run(['doctor'])));
+    // (c) Multiple NOW/NEXT lines (append-instead-of-rewrite) → doctor flags it.
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      ['# TASK', 'GOAL: g', 'NOW: newest', 'NOW: older append', 'NEXT: n', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
+    check('doctor flags multiple NOW lines (append not rewrite)', /has 2 NOW \+ 1 NEXT lines — rewrite/.test(run(['doctor'])));
+    check('parser is first-wins on repeated NOW (newest-on-top)', /NOW: newest/.test(run(['digest'])) && !/NOW: older append/.test(run(['digest'])));
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore fresh fixture
 
     // --- write-back primitive ①: evidence-based staleness ---
     // Clock fallback (tmp is not a git repo): an old UPDATED must flag stale.
