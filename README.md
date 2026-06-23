@@ -75,6 +75,7 @@ Code Recall follows a "subtractive" philosophy: condense memory into a few stati
 - **⚡ Token discipline:** only a ≤200-token digest is injected each session (the whole ledger is **not** stuffed into context); zero cost in non-Code-Recall projects.
 - **🔎 Searchable:** zero-dep BM25 lexical search (English & Chinese), covering cross-month recall.
 - **🧹 Anti-rot:** temporal/supersede/expire model + `doctor` lint + an optional git pre-commit gate minimize "stale ledger misleads you."
+- **🚨 Fail-loud, not fail-silent:** tolerant `TASK.md` parsing + digest/`doctor` warnings surface a malformed or append-drifted ledger — a missing-colon `NOW`, multiple `NOW` lines (appending instead of rewriting), or a `NOW` that's actually finished work — **before** the agent re-anchors to it, instead of silently shipping an empty/misleading anchor. Authored ADR fields are never silently truncated on write. (Hardened via a 3-round adversarial review against a real project whose ledger had drifted.)
 - **🪟 Windows-first:** PowerShell installer, native Windows 11 support.
 
 ---
