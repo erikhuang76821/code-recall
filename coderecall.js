@@ -40,7 +40,8 @@ const LEDGER_WARN_BYTES = 4096;        // doctor warns > ~4KB/file
 const SNAPSHOT_KEEP = 5;               // newest precompact/manual snapshots kept
 const STALE_HOURS = 2;                 // ledger considered stale after 2h
 const TITLE_OVERLAP_THRESHOLD = 0.8;   // dedupe-on-write title overlap
-const MAX_TRANSCRIPT_LINE = 200;       // cap any transcript-derived line
+const MAX_TRANSCRIPT_LINE = 200;       // cap any transcript-derived line (with a visible […] marker)
+const MAX_AUTHORED_LINE = 4000;        // anti-bloat cap for AUTHORED ADR/lesson lines — silent, NEVER appends a marker
 const SEARCH_LIMIT_DEFAULT = 5;        // coderecall search results shown by default
 const SESSIONS_KEEP = 50;              // bounded sessions.md timeline entries
 const STALE_REMINDER_MINUTES = 45;     // UserPromptSubmit reminder fires after this; also its throttle window
@@ -250,13 +251,23 @@ const PEM_BEGIN_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 const PEM_END_RE = /-----END [A-Z ]*PRIVATE KEY-----/;
 
 /**
- * Sanitize text that may have been copied out of transcripts or tool output:
- * drop lines matching secret patterns, cap each line at MAX_TRANSCRIPT_LINE chars.
- * Stateful across lines: a PEM "-----BEGIN ... PRIVATE KEY-----" opens a block
- * that is redacted through the matching "-----END ...-----" inclusive
+ * Sanitize text that may contain secrets: drop lines matching secret patterns and
+ * redact PEM private-key blocks. Stateful across lines: a "-----BEGIN ... PRIVATE
+ * KEY-----" opens a block redacted through the matching "-----END-----" inclusive
  * (unterminated blocks are redacted to end of input).
+ *
+ * Line-length handling depends on PROVENANCE (opts.authored):
+ *  - default (transcript/tool output, UNTRUSTED): cap each line at MAX_TRANSCRIPT_LINE
+ *    and append a visible " […]" marker — the line is display-bound context.
+ *  - authored:true (ADR/lesson bodies the agent deliberately wrote): apply ONLY a
+ *    high anti-bloat cap (MAX_AUTHORED_LINE) and truncate SILENTLY with NO marker.
+ *    Reusing the 200-char transcript cap here used to silently mutate authored
+ *    decisions and round-trip " […]" into the canonical ledger (see DECISIONS:
+ *    "Ledger integrity: write path truncates ADR fields"). Secret redaction is
+ *    intentionally kept on this path — an agent can still paste a token by mistake.
  */
-function sanitize(text) {
+function sanitize(text, opts) {
+  const authored = !!(opts && opts.authored);
   let inPem = false;
   return splitLines(text).map((line) => {
     if (inPem) {
@@ -269,6 +280,9 @@ function sanitize(text) {
     }
     for (const re of SECRET_PATTERNS) {
       if (re.test(line)) return '[coderecall: line removed — matched secret pattern]';
+    }
+    if (authored) {
+      return line.length > MAX_AUTHORED_LINE ? line.slice(0, MAX_AUTHORED_LINE) : line; // silent, no marker
     }
     if (line.length > MAX_TRANSCRIPT_LINE) return line.slice(0, MAX_TRANSCRIPT_LINE) + ' […]';
     return line;
@@ -472,7 +486,10 @@ function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMa
     const text = readFileSafe(filePath);
     if (text === null) fail('missing ' + filePath);
     const parsed = parseEntries(text);
-    const clean = splitLines(sanitize(bodyLines.join('\n')));
+    // AUTHORED content (decision/--body/write_lesson all funnel through here):
+    // redact secrets but do NOT apply the 200-char transcript cap — that silently
+    // mutated ADR fields and leaked " […]" into the ledger. Anti-bloat cap only.
+    const clean = splitLines(sanitize(bodyLines.join('\n'), { authored: true }));
     const st = /^(?:proposed|accepted|superseded|deprecated)$/.test(status || '') ? status : 'accepted';
     const freshLines = ['## ' + title, '- date: ' + todayDate(), '- status: ' + st, '- confidence: ' + (confidence || 'med')];
     // P2 — explicit supersede: when supersedeMatch is given, retire the active
@@ -2242,6 +2259,15 @@ function cmdSelftest() {
     run(['decision', 'Selftest decision', '--context', 'c', '--decision', 'd', '--consequences', 'q']);
     const decText = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
     check('decision CLI writes an ADR entry', /## Selftest decision/.test(decText) && /- status: accepted/.test(decText) && /\*\*Decision:\*\* d/.test(decText));
+    // Regression: a long ADR field must NOT be truncated to 200 chars nor get a
+    // " […]" marker on write (the secret-sanitizer's transcript cap once leaked
+    // both into the canonical ledger). Authored content keeps secret redaction but
+    // only a high silent anti-bloat cap.
+    const longField = 'x'.repeat(900);
+    run(['decision', 'Long field decision', '--decision', longField]);
+    const longText = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+    check('decision write does not truncate a 900-char field', longText.indexOf('**Decision:** ' + longField) !== -1);
+    check('decision write never persists a […] truncation marker', !/Long field decision[\s\S]*?…\]/.test(longText));
     // P1/P2/P3: explicit supersede (titles differ) + lifecycle-aware retrieval.
     run(['decision', 'Use SQLite for local store', '--decision', 'simple']);
     run(['decision', 'Switch to Postgres for the store', '--decision', 'concurrency', '--supersedes', 'sqlite for local']);

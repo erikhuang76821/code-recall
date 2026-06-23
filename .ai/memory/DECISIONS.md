@@ -5,30 +5,13 @@ Entry format (strict):
   - date: YYYY-MM-DD
   - confidence: high|med|low
   <body, 1-3 lines>
+Retired/shipped-mechanics decisions live in archive/retired-*.md (still searchable).
 -->
-
-## DECISIONS.md upgraded to ADR-grade (status + Context/Decision/Consequences)
-- date: 2026-06-10
-- status: accepted
-- confidence: high
-**Context:** core direction is decision persistence; flat date+confidence entries didn't capture WHY/consequences or an ADR status lifecycle.
-**Decision:** add optional `status` (proposed/accepted/superseded/deprecated) + Context/Decision/Consequences structure, reusing existing supersede/expire as the lifecycle; MCP write_decision takes structured fields. Backward-compatible (no parser rewrite — sections are body markdown).
-**Consequences:** consolidate now retires deprecated too; lint validates status; old entries without status stay valid (treated as live). Kept it lightweight — no enforcement/approval (that's the OUT scope fence).
 
 ## Core direction = Decision Persistence (AI-maintained, compaction-surviving ADR)
 - date: 2026-06-10
 - confidence: high
 Headline capability is persisting WHY + dead-ends across context resets — the gap /init and /handoff leave. Many tools record decisions; almost none make decision PERSISTENCE the core. Differentiation is not inventing ADR but: AI-maintained + survives compaction + temporal anti-rot + zero-dep local. Value=decision log; moat=compaction survival + reliable capture. #1 risk = honor-system write-back → prioritize MCP/Stop-hook capture + score penalizing thin logs.
-
-## score empty-ledger guard: floor at 8 when GOAL/NOW/NEXT all placeholder
-- date: 2026-06-10
-- confidence: high
-Free support dims (freshness/blockers/grounding) were padding an empty template to 33 — false comfort. When core fields are all placeholders, cap overall <=8 + label "empty ledger". selftest asserts empty < 15.
-
-## `score` is a transparent heuristic, not an ML/precision number
-- date: 2026-06-10
-- confidence: high
-coderecall score weights toward actionability (vague NEXT like "continue" scores low even when filled; blockers must carry a reason). Each dim shows why + "fix first". Codex bar: must machine-check actionability or it's decoration — selftest asserts concrete NEXT=100, vague NEXT<60. Purpose: catch false completeness, the failure mode behind "agent doesn't know what to do next".
 
 ## Hybrid git ownership: commit durable knowledge, gitignore working state
 - date: 2026-06-10
@@ -38,17 +21,12 @@ init writes a .gitignore block: DECISIONS/LESSONS + consolidated/retired archive
 ## Lead positioning with compaction survival, not "memory"
 - date: 2026-06-10
 - confidence: high
-README headline = "working memory for coding agents that survives context compaction". graduate demoted out of core command list (experimental). The defensible wedge is compaction recovery + stale-state prevention, NOT a "protocol" (don't declare protocol before multi-party adoption earns it — Codex).
+README headline = "working memory for coding agents that survives context compaction". graduate demoted out of core command list (experimental). The defensible wedge is compaction recovery + stale-state prevention, NOT a "protocol" (don't declare protocol before multi-party adoption earns it — Codex). [Extended, not superseded, by the 2026-06-12 Strategy entry.]
 
 ## Search is lexical (BM25), not semantic
 - date: 2026-06-10
 - confidence: high
 Chose zero-dep BM25 over embeddings/vector DB to keep the no-daemon/no-network/no-deps brand. Honestly weaker than semantic recall, but answers "where did I decide X" without install cost. Tokenizer indexes alphanumeric words + individual CJK chars so CN/EN both work.
-
-## Cursor hooks.json + Gemini settings are best-effort JSON merges
-- date: 2026-06-10
-- confidence: med
-sync --all merges (never overwrites) into .gemini/settings.json (contextFileName) and .cursor/hooks.json (Stop). Cursor's hook schema is young and may change; entry is idempotent and removed by deinit. Plain-quote the node path — do NOT JSON.stringify it first (double-escapes backslashes).
 
 ## v2.0 MCP server is zero-dep stdio JSON-RPC, files stay the storage layer
 - date: 2026-06-10
@@ -60,28 +38,10 @@ sync --all merges (never overwrites) into .gemini/settings.json (contextFileName
 - confidence: high
 upsertEntry on >0.8 title overlap marks old `status: superseded` + keeps it (evolution stays searchable), new entry records `supersedes:`. `expires:` enables auto-forget. consolidate retires superseded+expired to archive/retired-YYYY-MM.md. Borrowed from supermemory's temporal/contradiction handling, zero-dep (no LLM/vector).
 
-## Git pre-commit hook is a coderecall.js subcommand, not shell in the installers
-- date: 2026-06-10
-- confidence: high
-Implemented install-githook/precommit/remove-githook in coderecall.js (node writes the .git/hooks/pre-commit file) instead of duplicating shell logic in install.ps1 + install.sh. One cross-platform code path, testable, and Git for Windows runs the sh hook fine. Re-stage uses `git ls-files --cached --error-unmatch` (tracked?), NOT `git diff --cached` (which misses a freshly-refreshed file).
-
 ## Pre-commit hook is advisory by default; --strict bakes in blocking; no ANSI
 - date: 2026-06-10
 - confidence: high
-`install-githook` default warns-but-allows (refresh is the value; blocking a code commit over a missing confidence line is high-friction and trains --no-verify). `install-githook --strict` writes `precommit --strict` into the hook to block. Lint banner uses plain text, NOT ANSI colour — a git hook's stdout is not reliably a TTY and colour garbles on Windows cmd. Settled a v1.3.x debate with the external reviewer.
-
-## Staleness reminder hook ships OFF by default
-- date: 2026-06-10
-- confidence: high
-UserPromptSubmit reminder is opt-in (installers don't register it) because token discipline is SPEC priority #5. Throttled via .reminder to at most once per 45-min window.
-
-## Reliable capture via friction-reduction + advisory nudge, not Stop-hook coercion
-- date: 2026-06-10
-- status: accepted
-- confidence: high
-**Context:** decision log's value depends on write-back actually happening (honor-system risk)
-**Decision:** add a one-line `decision` CLI + a pre-commit advisory nudge; leave score undistorted
-**Consequences:** non-coercive, on-brand; capture is easier + prompted at the commit checkpoint, never blocks
+`install-githook` default warns-but-allows (refresh is the value; blocking a code commit over a missing confidence line is high-friction and trains --no-verify). `install-githook --strict` writes `precommit --strict` into the hook to block. Lint banner uses plain text, NOT ANSI colour — a git hook's stdout is not reliably a TTY and colour garbles on Windows cmd. Settled a v1.3.x debate with the external reviewer. [Restored to live 2026-06-23: this is a friction-POLICY tradeoff a future session could re-litigate, not settled mechanics — Codex review.]
 
 ## Lifecycle-aware retrieval: search current truth by default, weight by status
 - date: 2026-06-10
@@ -112,8 +72,8 @@ UserPromptSubmit reminder is opt-in (installers don't register it) because token
 - status: accepted
 - confidence: med
 **Context:** Platform auto-memory (Claude/Gemini/Cursor/Cline) duplicates decisions and lessons already in .ai/memory/, breaking SSOT across any project using coderecall.
-**Decision:** Add rule 6 to templates/AGENTS-section.md: ledger is SSOT, auto-memory only for positioning/cross-project context/tool quirks. Three-way reviewed (Claude 4.6 + Gemini 3.1 Pro + Codex GPT […]
-**Consequences:** Every future coderecall init complete — this project now has a decision log at .ai/memory/ (per-project, lives in THIS repo).   kept existing: .ai\memory\TASK.md, .ai\memory\DECISION […]
+**Decision:** Add the auto-memory boundary rule to templates/AGENTS-section.md (shipped as rule 6, now rule 7 in this repo's AGENTS.md): the ledger is SSOT; auto-memory is ONLY for positioning / cross-project context / local OS+tool quirks. Three-way reviewed (Claude 4.6 + Gemini 3.1 Pro + Codex GPT-5.5).
+**Consequences:** Establishes SSOT on first init for every future coderecall project — no decisions/lessons/working-state duplicated into platform memory. Already propagated into this repo's own ledger (commit fa6f06f).
 
 ## SessionStart digest trimmed ~13% via single fence + tiered protocol
 - date: 2026-06-12
@@ -151,6 +111,15 @@ UserPromptSubmit reminder is opt-in (installers don't register it) because token
 - date: 2026-06-18
 - status: accepted
 - confidence: med
-**Context:** Three-way review (Claude+Codex) found: DIGEST_CHAR_BUDGET declared but never enforced (digest could grow with ledger); consolidate was manual-only so files grow unbounded; AGENTS protocol […]
-**Decision:** buildDigest enforces fenceMax = DIGEST_CHAR_BUDGET (+TASK_BODY_MAX_CHARS in compact) on fence CONTENT with marker inside the fence; new runConsolidateAutoSafe (quiet, touch:false, skip-o […]
-**Consequences:** Per-turn digest is bounded regardless of ledger size; PreCompact keeps the ledger lean without masking staleness (UPDATED untouched in auto path) or hard-failing on lock contention.  […]
+**Context:** A Claude+Codex review of unbounded ledger growth found three token-amplification bugs: DIGEST_CHAR_BUDGET was declared but never enforced (the per-turn digest could grow with the ledger); consolidate was manual-only (files grow unbounded); and the AGENTS protocol let agents full-file-read DECISIONS.md/LESSONS.md, re-billing the whole ledger every turn.
+**Decision:** (1) buildDigest enforces a hard ceiling on the untrusted fence CONTENT (DIGEST_CHAR_BUDGET, +TASK_BODY_MAX_CHARS in compact); the truncation marker stays INSIDE the fence so the closing marker + protocol + safety lines are never dropped. (2) consolidate gains a non-blocking `--auto-safe` path (quiet, skip-on-contention, does NOT touch TASK.md UPDATED) and PreCompact runs it after snapshotting. consolidateLocked now takes {quiet, touch}. (3) AGENTS protocol rule 4 mandates `coderecall search` / search_memory over full-file reads.
+**Consequences:** Per-turn digest is bounded regardless of ledger size; PreCompact keeps the ledger lean without masking staleness (UPDATED untouched on the auto path) or hard-failing on lock contention. +6 regression tests (41/41 selftest).
+
+## Ledger integrity: write path truncates ADR fields; relevance decay only on explicit supersede
+- date: 2026-06-23
+- confidence: high
+**Context:** A 2026-06-23 hygiene pass (Claude + Codex GPT-5.5 adversarial review) surfaced gaps the tool's own ledger had already fallen into.
+PROVEN ROOT CAUSE (found this pass, supersedes the earlier command-substitution guess): the `decision` CLI / `write_decision` write path runs the body through `sanitize()` (coderecall.js:475), a SECRET-REDACTION function that also caps every line at MAX_TRANSCRIPT_LINE=200 chars and appends ` […]`. `composeAdrBody` (coderecall.js:2519) collapses each Context/Decision/Consequences field to a SINGLE line, so any field >200 chars is silently truncated on write. This corrupted the first cut of THIS very entry (all 3 fields > 200) and the `[…]` tails on the auto-memory-boundary entry. Hand-edited entries (e.g. the long Strategy/Trustworthy-adoption ADRs) escape it because they never pass through sanitize().
+Three further gaps: (1) `consolidate` retires ONLY entries explicitly marked superseded/deprecated/expired, so "obsoleted by shipping" is never modeled → live pool grows unbounded with settled detail (8 had to be hand-archived). (2) No semantic content validation on write — raw `coderecall init` stdout was once accepted as a Consequences body (how that text reached the arg remains unexplained). (3) Truncation markers must never be persisted to a stored entry; today the same redaction cap leaks them into the canonical file.
+**Decision:** (a) DONE this pass: `sanitize()` now takes `{authored:true}` (coderecall.js); the `upsertEntry` choke point (covers decision / `--body` / `write_lesson`) passes it, so authored ADR/lesson bodies keep secret+PEM redaction but get only a SILENT high anti-bloat cap (MAX_AUTHORED_LINE=4000, no marker) instead of the 200-char transcript cap. +2 regression selftests (43/43): a 900-char field survives intact and no `[…]` is ever persisted. Cap of 4000 (vs unbounded) per Codex — `composeAdrBody` collapses each field to one line, so a pasted block has no natural break. (b) STILL BACKLOG: light write-time validation rejecting bodies that look like a CLI banner. (c) STILL BACKLOG: for relevance decay, add an EXPLICIT machine field (`shipped-in:` / `retire-after:` / `scope:`) rather than inferring from TASK.md checklist state — TASK.md is gitignored, per-developer, and decisions don't formally link to checklist items, so a checklist heuristic would be lossy (Codex's flag on the weakest proposal).
+**Consequences:** Tracked in TASK.md. This is the honor-system write-back risk made concrete in the project's OWN ledger: the tool reliably captures THAT you wrote, never validates WHAT — and worse, its security sanitizer silently mutated authored content. Until fixed, author long ADR bodies via hand-edit (or keep each CLI field < ~190 chars) and ledger hygiene stays a manual periodic pass. Diagnosis accepted; fixes pending — do not re-litigate whether these are real.
