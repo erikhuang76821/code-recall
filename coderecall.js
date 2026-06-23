@@ -40,6 +40,9 @@ const LEDGER_WARN_BYTES = 4096;        // doctor warns > ~4KB/file
 const SNAPSHOT_KEEP = 5;               // newest precompact/manual snapshots kept
 const STALE_HOURS = 2;                 // ledger considered stale after 2h
 const TITLE_OVERLAP_THRESHOLD = 0.8;   // dedupe-on-write title overlap
+// A NOW: value that reads like a completed-work LOG rather than a current task.
+// Strong, low-false-positive markers only (a checkmark, or Chinese "已 + done-verb").
+const NOW_LOOKS_DONE_RE = /[✓✔]|已(?:經)?(?:合併|完成|推上|推送|送出|結案)/;
 const MAX_TRANSCRIPT_LINE = 200;       // cap any transcript-derived line (with a visible […] marker)
 const MAX_AUTHORED_LINE = 4000;        // anti-bloat cap for AUTHORED ADR/lesson lines — silent, NEVER appends a marker
 const SEARCH_LIMIT_DEFAULT = 5;        // coderecall search results shown by default
@@ -342,7 +345,16 @@ function parseTask(text) {
 function touchTaskUpdated() {
   const text = readFileSafe(TASK_FILE);
   if (text === null) return;
-  const lines = splitLines(text).map((l) => l.startsWith('UPDATED: ') ? 'UPDATED: ' + nowIso() : l);
+  // Rewrite any line the parser recognizes as UPDATED (incl. "UPDATED：" / bare
+  // forms) into the canonical "UPDATED: <iso>" — otherwise a parseable-but-
+  // noncanonical UPDATED would be READ by doctor/digest yet never REFRESHED here
+  // (Codex Round-1 F5), silently freezing the freshness signal.
+  let rewrote = false;
+  const lines = splitLines(text).map((l) => {
+    if (matchTaskField(l, 'UPDATED') !== null) { rewrote = true; return 'UPDATED: ' + nowIso(); }
+    return l;
+  });
+  if (!rewrote) return; // no UPDATED line at all — don't fabricate one (preserve prior behavior)
   writeFileAtomic(TASK_FILE, lines.join('\n'));
 }
 
@@ -508,7 +520,15 @@ function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMa
     // AUTHORED content (decision/--body/write_lesson all funnel through here):
     // redact secrets but do NOT apply the 200-char transcript cap — that silently
     // mutated ADR fields and leaked " […]" into the ledger. Anti-bloat cap only.
-    const clean = splitLines(sanitize(bodyLines.join('\n'), { authored: true }));
+    const bodyJoined = bodyLines.join('\n');
+    const clean = splitLines(sanitize(bodyJoined, { authored: true }));
+    // The 4000-char anti-bloat cap is still a truncation — don't let it be SILENT
+    // (Codex Round-1 F4). Warn to stderr (stdout is reserved for MCP JSON-RPC) so
+    // the author knows to split the line; the entry is still written.
+    if (splitLines(bodyJoined).some((l) => l.length > MAX_AUTHORED_LINE)) {
+      process.stderr.write('coderecall: warning — an entry line exceeded ' + MAX_AUTHORED_LINE +
+        ' chars and was truncated; split it into shorter lines to preserve the full text.\n');
+    }
     const st = /^(?:proposed|accepted|superseded|deprecated)$/.test(status || '') ? status : 'accepted';
     const freshLines = ['## ' + title, '- date: ' + todayDate(), '- status: ' + st, '- confidence: ' + (confidence || 'med')];
     // P2 — explicit supersede: when supersedeMatch is given, retire the active
@@ -706,6 +726,22 @@ function buildDigest(opts) {
   if (goalIsSet && !t.now) {
     lines.push('[coderecall] WARNING: GOAL is set but NOW: could not be parsed from TASK.md — ' +
       'likely a format slip (use "NOW: <one line>" with a colon). There is no current-state anchor until this is fixed.');
+  }
+  // Multiple NOW/NEXT lines ⇒ the file is being appended to, not rewritten. The
+  // re-anchor above is only the FIRST (newest) line and may be ambiguous. doctor
+  // already flags this, but a fresh/compacted agent only sees the DIGEST — surface
+  // it here too (Codex Round-1 finding: warning was invisible on the hot path).
+  if (t.nowLines > 1 || t.nextLines > 1) {
+    lines.push('[coderecall] WARNING: TASK.md has ' + t.nowLines + ' NOW + ' + t.nextLines +
+      ' NEXT lines — the re-anchor above is the newest only and may be ambiguous. ' +
+      'Collapse to one NOW:/NEXT: and move finished-step logs to sessions.md/DECISIONS.md.');
+  }
+  // The current NOW reads like a COMPLETED-work log (✓ / 已合併 / 已完成 / 已推上),
+  // not a next action — the failure mode that strands a re-anchoring agent even when
+  // NOW parses fine and UPDATED is fresh (Codex Round-1: biggest silent-but-parseable hole).
+  if (t.now && NOW_LOOKS_DONE_RE.test(t.now)) {
+    lines.push('[coderecall] WARNING: NOW: contains completion markers (✓/已完成/已合併) — if that work is DONE, ' +
+      'replace NOW: with the actual current task; do not treat finished work as in-progress.');
   }
   if (opts.compact) {
     // Point the agent at the freshest pre-compaction snapshot (filename is
@@ -1246,6 +1282,8 @@ function cmdDoctor() {
   // sessions.md / DECISIONS.md. Left unchecked this grows TASK.md without bound
   // (LevelTest reached 60KB / 15× the byte budget this way).
   if (t.nowLines > 1 || t.nextLines > 1) warn('TASK.md has ' + t.nowLines + ' NOW + ' + t.nextLines + ' NEXT lines — rewrite NOW:/NEXT: in place, do not append; move finished-step logs to sessions.md/DECISIONS.md');
+  // Stale-but-parseable NOW: looks like a completed-work log, not a current task.
+  if (t.now && NOW_LOOKS_DONE_RE.test(t.now)) warn('TASK.md NOW: contains completion markers (✓/已完成/已合併) — if that work is done, replace NOW: with the current task so the digest re-anchors to live work');
 
   // 2. Marker section drift
   console.log('[sync]');
@@ -2209,7 +2247,23 @@ function cmdSelftest() {
       ['# TASK', 'GOAL: g', 'NOW: newest', 'NOW: older append', 'NEXT: n', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
     check('doctor flags multiple NOW lines (append not rewrite)', /has 2 NOW \+ 1 NEXT lines — rewrite/.test(run(['doctor'])));
     check('parser is first-wins on repeated NOW (newest-on-top)', /NOW: newest/.test(run(['digest'])) && !/NOW: older append/.test(run(['digest'])));
+    // (d) the multi-NOW warning must also fire on the DIGEST (hot path), not just
+    //     doctor (Codex Round-1 F1: a fresh/compacted agent only sees the digest).
+    check('digest WARNs on multiple NOW lines (Round-1 F1)', /WARNING: TASK\.md has 2 NOW \+ 1 NEXT lines/.test(run(['digest'])));
+    // (e) stale-but-parseable: a single NOW that reads like completed work → advise
+    //     replacing it (Round-1 F3: the biggest silent-but-parseable hole).
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      ['# TASK', 'GOAL: g', 'NOW: shipped the thing ✓ 已合併推上 master abc123', 'NEXT: n', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
+    check('digest WARNs when NOW looks completed (✓/已合併)', /WARNING: NOW: contains completion markers/.test(run(['digest'])));
+    check('doctor WARNs when NOW looks completed (✓/已合併)', /NOW: contains completion markers/.test(run(['doctor'])));
     fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore fresh fixture
+    // (f) authored >MAX_AUTHORED_LINE field is capped (anti-bloat) but NOT 200-capped
+    //     and NEVER gets a "[…]" marker (Round-1 F4 — the >4000 case now has coverage).
+    const huge = 'y'.repeat(4100);
+    run(['decision', 'Huge field decision', '--decision', huge]);
+    const hugeText = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+    check('authored long field kept far past 200 chars, no truncation marker', /y{3900}/.test(hugeText) && !/Huge field decision[\s\S]*?…\]/.test(hugeText));
+    check('authored field still capped near MAX_AUTHORED_LINE (anti-bloat)', !/y{4001}/.test(hugeText));
 
     // --- write-back primitive ①: evidence-based staleness ---
     // Clock fallback (tmp is not a git repo): an old UPDATED must flag stale.
