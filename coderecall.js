@@ -40,6 +40,9 @@ const LEDGER_WARN_BYTES = 4096;        // doctor warns > ~4KB/file
 const SNAPSHOT_KEEP = 5;               // newest precompact/manual snapshots kept
 const STALE_HOURS = 2;                 // ledger considered stale after 2h
 const TITLE_OVERLAP_THRESHOLD = 0.8;   // dedupe-on-write title overlap
+// A NOW: value that reads like a completed-work LOG rather than a current task.
+// Strong, low-false-positive markers only (a checkmark, or Chinese "已 + done-verb").
+const NOW_LOOKS_DONE_RE = /[✓✔]|已(?:經)?(?:合併|完成|推上|推送|送出|結案)/;
 const MAX_TRANSCRIPT_LINE = 200;       // cap any transcript-derived line (with a visible […] marker)
 const MAX_AUTHORED_LINE = 4000;        // anti-bloat cap for AUTHORED ADR/lesson lines — silent, NEVER appends a marker
 const SEARCH_LIMIT_DEFAULT = 5;        // coderecall search results shown by default
@@ -292,15 +295,34 @@ function sanitize(text, opts) {
 // ---------------------------------------------------------------------------
 // TASK.md parsing
 // ---------------------------------------------------------------------------
+// Match a TASK field label at line start. Accepts the canonical "NOW: x", a
+// full-width colon "NOW：x", a bare "NOW x", OR a bracketed "NOW【tag】x" — the
+// last is a common drift that USED to silently blank the digest (the parser
+// only knew "NOW: ", so a missing colon produced "NOW: (not set)" with no
+// warning — see the LevelTest field audit). The lookahead requires a real
+// delimiter after the label so "NOWHERE"/"NEXTGEN" never match. Returns the
+// trimmed value (may be '') or null when the line is not this field.
+function matchTaskField(line, label) {
+  const re = new RegExp('^' + label + '(?=[:：【\\s]|$)[:：]?\\s*(.*)$');
+  const m = re.exec(line);
+  return m ? m[1].trim() : null;
+}
+
 function parseTask(text) {
-  const t = { goal: '', now: '', next: '', updated: '', counts: { todo: 0, doing: 0, done: 0, blocked: 0 }, lines: [] };
+  const t = { goal: '', now: '', next: '', updated: '', counts: { todo: 0, doing: 0, done: 0, blocked: 0 }, nowLines: 0, nextLines: 0, lines: [] };
   if (text === null || text === undefined) return null;
   t.lines = splitLines(text);
   for (const line of t.lines) {
-    if (line.startsWith('GOAL: ')) t.goal = line.slice(6).trim();
-    else if (line.startsWith('NOW: ')) t.now = line.slice(5).trim();
-    else if (line.startsWith('NEXT: ')) t.next = line.slice(6).trim();
-    else if (line.startsWith('UPDATED: ')) t.updated = line.slice(9).trim();
+    let v;
+    if ((v = matchTaskField(line, 'GOAL')) !== null) t.goal = v;
+    // NOW/NEXT: FIRST occurrence wins (not last). A correctly-maintained file has
+    // exactly one of each, so this is identical there — but the append-drift this
+    // guards against prepends newest-on-top, so first-wins surfaces the MOST recent
+    // state to a re-anchoring agent instead of the oldest. nowLines/nextLines still
+    // count every occurrence so doctor can flag the append (see cmdDoctor).
+    else if ((v = matchTaskField(line, 'NOW')) !== null) { if (!t.nowLines) t.now = v; t.nowLines++; }
+    else if ((v = matchTaskField(line, 'NEXT')) !== null) { if (!t.nextLines) t.next = v; t.nextLines++; }
+    else if ((v = matchTaskField(line, 'UPDATED')) !== null) t.updated = v;
     else {
       // Lenient checklist matcher (allows indentation, no trailing-space
       // requirement). Keep in sync with hooks/sessionstart counting and
@@ -323,7 +345,16 @@ function parseTask(text) {
 function touchTaskUpdated() {
   const text = readFileSafe(TASK_FILE);
   if (text === null) return;
-  const lines = splitLines(text).map((l) => l.startsWith('UPDATED: ') ? 'UPDATED: ' + nowIso() : l);
+  // Rewrite any line the parser recognizes as UPDATED (incl. "UPDATED：" / bare
+  // forms) into the canonical "UPDATED: <iso>" — otherwise a parseable-but-
+  // noncanonical UPDATED would be READ by doctor/digest yet never REFRESHED here
+  // (Codex Round-1 F5), silently freezing the freshness signal.
+  let rewrote = false;
+  const lines = splitLines(text).map((l) => {
+    if (matchTaskField(l, 'UPDATED') !== null) { rewrote = true; return 'UPDATED: ' + nowIso(); }
+    return l;
+  });
+  if (!rewrote) return; // no UPDATED line at all — don't fabricate one (preserve prior behavior)
   writeFileAtomic(TASK_FILE, lines.join('\n'));
 }
 
@@ -489,7 +520,15 @@ function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMa
     // AUTHORED content (decision/--body/write_lesson all funnel through here):
     // redact secrets but do NOT apply the 200-char transcript cap — that silently
     // mutated ADR fields and leaked " […]" into the ledger. Anti-bloat cap only.
-    const clean = splitLines(sanitize(bodyLines.join('\n'), { authored: true }));
+    const bodyJoined = bodyLines.join('\n');
+    const clean = splitLines(sanitize(bodyJoined, { authored: true }));
+    // The 4000-char anti-bloat cap is still a truncation — don't let it be SILENT
+    // (Codex Round-1 F4). Warn to stderr (stdout is reserved for MCP JSON-RPC) so
+    // the author knows to split the line; the entry is still written.
+    if (splitLines(bodyJoined).some((l) => l.length > MAX_AUTHORED_LINE)) {
+      process.stderr.write('coderecall: warning — an entry line exceeded ' + MAX_AUTHORED_LINE +
+        ' chars and was truncated; split it into shorter lines to preserve the full text.\n');
+    }
     const st = /^(?:proposed|accepted|superseded|deprecated)$/.test(status || '') ? status : 'accepted';
     const freshLines = ['## ' + title, '- date: ' + todayDate(), '- status: ' + st, '- confidence: ' + (confidence || 'med')];
     // P2 — explicit supersede: when supersedeMatch is given, retire the active
@@ -662,6 +701,25 @@ function buildDigest(opts) {
       ledgerParts.push('Cross-project lessons (top ' + gl.length + '):');
       for (const t2 of gl) ledgerParts.push(neutralizeLedger(sanitize('- ' + t2)));
     }
+  }
+  // Malformed-ledger warnings go BEFORE the fence (and thus before the full
+  // TASK.md body in compact mode) — a re-anchoring agent must read the distrust
+  // signal BEFORE the stale content it applies to (Codex Round-2 F2: emitting them
+  // after the fence let a compacted agent read stale completed-NOW logs first).
+  // They are coderecall-authored, so living outside the untrusted fence is correct.
+  const goalIsSet = t.goal && !/^<.*>$/.test(t.goal) && t.goal !== '(not set)';
+  if (goalIsSet && !t.now) {
+    lines.push('[coderecall] WARNING: GOAL is set but NOW: could not be parsed from TASK.md — ' +
+      'likely a format slip (use "NOW: <one line>" with a colon). The ledger below has no current-state anchor until this is fixed.');
+  }
+  if (t.nowLines > 1 || t.nextLines > 1) {
+    lines.push('[coderecall] WARNING: TASK.md has ' + t.nowLines + ' NOW + ' + t.nextLines +
+      ' NEXT lines — the NOW in the ledger below is only the newest and may be ambiguous. ' +
+      'Collapse to one NOW:/NEXT: and move finished-step logs to sessions.md/DECISIONS.md.');
+  }
+  if (t.now && NOW_LOOKS_DONE_RE.test(t.now)) {
+    lines.push('[coderecall] WARNING: the NOW in the ledger below contains completion markers ' +
+      '(✓/已完成/已合併) — if that work is DONE it is not the current task; verify what is actually in progress before continuing.');
   }
   lines.push(LEDGER_FENCE_BEGIN);
   // Hard ceiling on the untrusted fence CONTENT (the only part that grows with
@@ -1207,6 +1265,17 @@ function cmdDoctor() {
   if (age === null) warn('TASK.md UPDATED line missing or unparseable');
   else if (age > STALE_HOURS && t.goal && !t.goal.startsWith('<')) warn('TASK.md is ' + age.toFixed(1) + 'h old — ledger may be stale');
   else ok('TASK.md freshness ' + age.toFixed(1) + 'h');
+  // GOAL set but NOW unparseable → the digest has no current-state anchor (the
+  // exact failure that silently stranded LevelTest: "NOW【…】" with no colon).
+  const goalIsSet = t.goal && !/^<.*>$/.test(t.goal) && t.goal !== '(not set)';
+  if (goalIsSet && !t.now) warn('TASK.md GOAL is set but NOW: could not be parsed — check for a missing colon (use "NOW: <one line>"); the digest re-anchor will be empty');
+  // Multiple NOW/NEXT lines ⇒ the file is being APPENDED to, not rewritten in place.
+  // NOW must be the single current state; a log of finished steps belongs in
+  // sessions.md / DECISIONS.md. Left unchecked this grows TASK.md without bound
+  // (LevelTest reached 60KB / 15× the byte budget this way).
+  if (t.nowLines > 1 || t.nextLines > 1) warn('TASK.md has ' + t.nowLines + ' NOW + ' + t.nextLines + ' NEXT lines — rewrite NOW:/NEXT: in place, do not append; move finished-step logs to sessions.md/DECISIONS.md');
+  // Stale-but-parseable NOW: looks like a completed-work log, not a current task.
+  if (t.now && NOW_LOOKS_DONE_RE.test(t.now)) warn('TASK.md NOW: contains completion markers (✓/已完成/已合併) — if that work is done, replace NOW: with the current task so the digest re-anchors to live work');
 
   // 2. Marker section drift
   console.log('[sync]');
@@ -2151,6 +2220,54 @@ function cmdSelftest() {
     check('compact digest embeds full TASK body', /--- Full TASK\.md ---/.test(compact));
     check('compact digest carries NEXT verbatim', /NEXT: add backpressure to stage 3/.test(compact));
     check('compact digest keeps untrusted fence', /UNTRUSTED-LEDGER-DATA:BEGIN/.test(compact));
+
+    // --- TASK field robustness (LevelTest field audit) ---
+    // (a) Parser tolerates a bracketed "NOW【…】" / missing-colon drift so the
+    //     digest is not silently blanked to "(not set)".
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      ['# TASK', 'GOAL: ship it', 'NOW【wip】wiring stage two', 'NEXT：add backpressure', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
+    const tol = run(['digest']);
+    check('digest tolerates NOW【…】 (no silent (not set))', /NOW: 【wip】wiring stage two/.test(tol) && !/NOW: \(not set\)/.test(tol));
+    check('digest tolerates full-width colon NEXT：', /NEXT: add backpressure/.test(tol));
+    // (b) GOAL set but NOW genuinely absent → loud WARNING, not a silent blank.
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      ['# TASK', 'GOAL: ship it', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
+    check('digest WARNs when GOAL set but NOW unparseable', /WARNING: GOAL is set but NOW: could not be parsed/.test(run(['digest'])));
+    check('doctor WARNs when GOAL set but NOW unparseable', /GOAL is set but NOW: could not be parsed/.test(run(['doctor'])));
+    // (c) Multiple NOW/NEXT lines (append-instead-of-rewrite) → doctor flags it.
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      ['# TASK', 'GOAL: g', 'NOW: newest', 'NOW: older append', 'NEXT: n', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
+    check('doctor flags multiple NOW lines (append not rewrite)', /has 2 NOW \+ 1 NEXT lines — rewrite/.test(run(['doctor'])));
+    check('parser is first-wins on repeated NOW (newest-on-top)', /NOW: newest/.test(run(['digest'])) && !/NOW: older append/.test(run(['digest'])));
+    // (d) the multi-NOW warning must also fire on the DIGEST (hot path), not just
+    //     doctor (Codex Round-1 F1: a fresh/compacted agent only sees the digest).
+    check('digest WARNs on multiple NOW lines (Round-1 F1)', /WARNING: TASK\.md has 2 NOW \+ 1 NEXT lines/.test(run(['digest'])));
+    // (e) stale-but-parseable: a single NOW that reads like completed work → advise
+    //     replacing it (Round-1 F3: the biggest silent-but-parseable hole).
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      ['# TASK', 'GOAL: g', 'NOW: shipped the thing ✓ 已合併推上 master abc123', 'NEXT: n', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
+    check('digest WARNs when NOW looks completed (✓/已合併)', /WARNING: the NOW in the ledger below contains completion markers/.test(run(['digest'])));
+    check('doctor WARNs when NOW looks completed (✓/已合併)', /NOW: contains completion markers/.test(run(['doctor'])));
+    // (e2) the completed/multi-NOW warnings must precede the fence (and thus the full
+    //      TASK body in compact) — a re-anchoring agent reads distrust BEFORE stale
+    //      content (Codex Round-2 F2). Assert order in compact mode.
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      ['# TASK', 'GOAL: g', 'NOW: shipped it ✓ 已合併', 'NEXT: n', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
+    const cmp = run(['digest', '--compact']);
+    check('compact: completion warning precedes the fenced TASK body (Round-2 F2)',
+      cmp.indexOf('contains completion markers') !== -1 &&
+      cmp.indexOf('contains completion markers') < cmp.indexOf('UNTRUSTED-LEDGER-DATA:BEGIN'));
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore fresh fixture
+    // (f) authored >MAX_AUTHORED_LINE field is capped (anti-bloat) but NOT 200-capped
+    //     and NEVER gets a "[…]" marker (Round-1 F4 — the >4000 case now has coverage).
+    const huge = 'y'.repeat(4100);
+    // spawnSync so we can read stderr on success (execFileSync only exposes it on error).
+    const hugeRun = cp.spawnSync(process.execPath, [__filename, 'decision', 'Huge field decision', '--decision', huge], { cwd: tmp, encoding: 'utf8' });
+    check('authored truncation warns on stderr, not silently (Round-2 F4)', /exceeded 4000 chars and was truncated/.test(hugeRun.stderr || ''));
+    const hugeText = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+    const hugeLine = splitLines(hugeText).find((l) => l.startsWith('**Decision:** y'));
+    check('authored long field kept far past 200 chars, no truncation marker', /y{3900}/.test(hugeText) && !/Huge field decision[\s\S]*?…\]/.test(hugeText));
+    check('authored field line capped at exactly MAX_AUTHORED_LINE (anti-bloat)', !!hugeLine && hugeLine.length === MAX_AUTHORED_LINE);
 
     // --- write-back primitive ①: evidence-based staleness ---
     // Clock fallback (tmp is not a git repo): an old UPDATED must flag stale.
