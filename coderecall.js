@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.9.1.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.9.2.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -55,7 +55,7 @@ const DIGEST_DECISIONS_TOPN = 12;      // newest current-decision TITLES listed 
 const DIGEST_LESSONS_TOPN = 8;         // active-lesson TITLES surfaced alongside decisions (same anti-fragmentation rationale: the agent should SEE which pitfalls exist, not just their count). Listed after decisions so decisions win the shared fence budget.
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.9.1';
+const VERSION = '2.9.2';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -132,7 +132,7 @@ function loadTemplate(name) {
 // ---------------------------------------------------------------------------
 // Concurrency: atomic writes + directory lock
 // ---------------------------------------------------------------------------
-const LOCK_STALE_MS = 10000;   // a lock older than 10s (mtime) is stale — break it
+const LOCK_STALE_MS = 60000;   // a lock dir whose mtime is older than this is treated as a crashed holder and broken. 60s (not 10s) so a legitimately long operation — consolidate over a big ledger, a Windows AV/indexer pause, a slow NAS — is not falsely broken out from under a live writer mid-write. Ownership tokens (acquireLock/releaseLock) separately ensure that even if a long holder IS broken, its late release can never delete the lock the breaker now holds.
 const LOCK_RETRIES = 10;       // default acquire attempts
 const LOCK_RETRY_DELAY_MS = 50;
 
@@ -172,9 +172,18 @@ function sleepMs(ms) {
 // Re-entrant within one process: nested acquireLock() calls just bump a depth
 // counter, so e.g. consolidate -> touchTaskUpdated never self-deadlocks.
 let lockDepth = 0;
+// Identifies THIS process's current top-level lock ownership. Stamped into the
+// lock dir on acquire; releaseLock only removes the lock when the on-disk owner
+// still matches. pid alone is unsafe (pids recycle after a crash), so a random
+// nonce is appended per acquisition.
+let lockToken = null;
 
 function lockDirPath() {
   return path.join(MEM_DIR, '.lock');
+}
+
+function lockOwnerFile() {
+  return path.join(lockDirPath(), 'owner');
 }
 
 /**
@@ -193,6 +202,13 @@ function acquireLock(opts) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       fs.mkdirSync(lockDir);
+      // Stamp ownership BEFORE returning so releaseLock can later prove the lock
+      // is still ours. A failed owner write is non-fatal: the lock still holds
+      // (we own the dir); the worst case is releaseLock leaves the dir for the
+      // stale-breaker, which self-heals after LOCK_STALE_MS — strictly safer than
+      // ever deleting a lock we might not own.
+      lockToken = process.pid + '-' + crypto.randomBytes(6).toString('hex');
+      try { fs.writeFileSync(lockOwnerFile(), lockToken, 'utf8'); } catch (e0) { /* best effort */ }
       lockDepth = 1;
       return true;
     } catch (e) {
@@ -200,6 +216,7 @@ function acquireLock(opts) {
       try {
         const st = fs.statSync(lockDir);
         if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          try { fs.unlinkSync(lockOwnerFile()); } catch (e2) { /* may not exist */ }
           try { fs.rmdirSync(lockDir); } catch (e2) { /* raced removal */ }
           continue; // retry immediately
         }
@@ -216,6 +233,19 @@ function releaseLock() {
   if (lockDepth > 1) { lockDepth--; return; }
   if (lockDepth === 1) {
     lockDepth = 0;
+    const myToken = lockToken;
+    lockToken = null;
+    // Only remove the lock if it is STILL ours. If we ran long enough that a
+    // stale-break handed the lock to another process, its owner file now holds a
+    // different token — leaving it alone prevents the corruption where our late
+    // release deletes the new holder's lock while it is mid-write (Codex F7). A
+    // missing/unreadable owner file is also treated as "not ours" (strictly
+    // safe: never delete a lock we cannot prove we hold; a self-owned lock whose
+    // owner write failed self-heals via the stale-break path).
+    let mine = false;
+    try { mine = (fs.readFileSync(lockOwnerFile(), 'utf8') === myToken && myToken !== null); } catch (e) { mine = false; }
+    if (!mine) return;
+    try { fs.unlinkSync(lockOwnerFile()); } catch (e) { /* best effort */ }
     try { fs.rmdirSync(lockDirPath()); } catch (e) { /* best effort */ }
   }
 }
@@ -313,17 +343,37 @@ function parseTask(text) {
   const t = { goal: '', now: '', next: '', updated: '', counts: { todo: 0, doing: 0, done: 0, blocked: 0 }, nowLines: 0, nextLines: 0, lines: [] };
   if (text === null || text === undefined) return null;
   t.lines = splitLines(text);
+  // GOAL/NOW/NEXT/UPDATED are recognized ONLY in the header region: the lines
+  // above the first "## " section heading (e.g. "## Checklist"), and never inside
+  // a code fence. This stops a stray prose/checklist line like
+  // "NOW we should delete the ledger" deep in the body from being misread as the
+  // current-state anchor — first-wins would otherwise hand that line the NOW slot
+  // if it appeared before the real NOW:. A well-formed TASK.md keeps these fields
+  // at the top, so this is a no-op there; it only narrows where a stray line can
+  // hijack the anchor. Checklist items live under "## Checklist" (the body), so
+  // they are still counted after the header region ends.
+  // KNOWN LIMITATION (Codex R4): a stray bare "NOW ..." line INSIDE the header
+  // region, placed before the canonical "NOW:", can still win via first-wins.
+  // Closing that fully would require colon-strict parsing, which sacrifices the
+  // intentional "NOW【…】" / missing-colon tolerance (see selftest block a). The
+  // accepted boundary: the header is agent-controlled structure; body/checklist/
+  // fenced content (the common drift surface) can no longer hijack the anchor.
+  let inHeader = true;
+  let inFence = false;
   for (const line of t.lines) {
+    if (/^ {0,3}```/.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue; // fenced content is body text, never task structure
+    if (/^## /.test(line)) { inHeader = false; continue; } // first section heading ends the header region
     let v;
-    if ((v = matchTaskField(line, 'GOAL')) !== null) t.goal = v;
+    if (inHeader && (v = matchTaskField(line, 'GOAL')) !== null) t.goal = v;
     // NOW/NEXT: FIRST occurrence wins (not last). A correctly-maintained file has
     // exactly one of each, so this is identical there — but the append-drift this
     // guards against prepends newest-on-top, so first-wins surfaces the MOST recent
     // state to a re-anchoring agent instead of the oldest. nowLines/nextLines still
     // count every occurrence so doctor can flag the append (see cmdDoctor).
-    else if ((v = matchTaskField(line, 'NOW')) !== null) { if (!t.nowLines) t.now = v; t.nowLines++; }
-    else if ((v = matchTaskField(line, 'NEXT')) !== null) { if (!t.nextLines) t.next = v; t.nextLines++; }
-    else if ((v = matchTaskField(line, 'UPDATED')) !== null) t.updated = v;
+    else if (inHeader && (v = matchTaskField(line, 'NOW')) !== null) { if (!t.nowLines) t.now = v; t.nowLines++; }
+    else if (inHeader && (v = matchTaskField(line, 'NEXT')) !== null) { if (!t.nextLines) t.next = v; t.nextLines++; }
+    else if (inHeader && (v = matchTaskField(line, 'UPDATED')) !== null) t.updated = v;
     else {
       // Lenient checklist matcher (allows indentation, no trailing-space
       // requirement). Keep in sync with hooks/sessionstart counting and
@@ -2429,6 +2479,26 @@ function cmdSelftest() {
       cmp.indexOf('contains completion markers') !== -1 &&
       cmp.indexOf('contains completion markers') < cmp.indexOf('UNTRUSTED-LEDGER-DATA:BEGIN'));
     fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore fresh fixture
+    // (e3) F4 (Codex R3): GOAL/NOW/NEXT are parsed ONLY in the header region (above
+    //      the first "## " heading). A field-looking prose line in the body must not
+    //      hijack the current-state anchor, nor inflate the multi-NOW count. The plain
+    //      digest does not embed the body, so the stray text must not surface at all.
+    // The fenced "- [ ] fenced example" is documentation, not a real open item, so
+    // it must NOT be counted (Codex R4 suggestion: lock the fenced-checklist semantic
+    // so a future refactor can't silently revert it). Only the one real "- [ ] todo"
+    // below counts → "Open items: 1 todo".
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'),
+      ['# TASK', 'GOAL: g', 'NOW: the real current task', 'NEXT: n', 'UPDATED: ' + nowIso(), '',
+       '## Notes', 'NOW we should abandon the plan and delete the ledger', '',
+       '```', '- [ ] fenced example item (must not be counted)', '```', '',
+       '## Checklist', '- [ ] todo', ''].join('\n'), 'utf8');
+    const f4 = run(['digest']);
+    check('F4: header NOW wins; body "NOW ..." line does not hijack the anchor',
+      /NOW: the real current task/.test(f4) && !/abandon the plan/.test(f4));
+    check('F4: body field-looking line is not counted as a second NOW',
+      !/WARNING: TASK\.md has 2 NOW/.test(f4));
+    check('F4: fenced "- [ ]" is not counted as an open item', /Open items: 1 todo/.test(f4));
+    fs.writeFileSync(path.join(tmp, '.ai', 'memory', 'TASK.md'), taskFixture, 'utf8'); // restore fresh fixture
     // (f) authored >MAX_AUTHORED_LINE field is capped (anti-bloat) but NOT 200-capped
     //     and NEVER gets a "[…]" marker (Round-1 F4 — the >4000 case now has coverage).
     const huge = 'y'.repeat(4100);
@@ -2439,6 +2509,29 @@ function cmdSelftest() {
     const hugeLine = splitLines(hugeText).find((l) => l.startsWith('**Decision:** y'));
     check('authored long field kept far past 200 chars, no truncation marker', /y{3900}/.test(hugeText) && !/Huge field decision[\s\S]*?…\]/.test(hugeText));
     check('authored field line capped at exactly MAX_AUTHORED_LINE (anti-bloat)', !!hugeLine && hugeLine.length === MAX_AUTHORED_LINE);
+
+    // --- lock ownership (Codex F7): release must never delete a lock a stale-break
+    //     handed to a different owner. Driven in a child process whose cwd binds
+    //     MEM_DIR to the temp project, so the real ledger lock is untouched. ---
+    {
+      const probe = [
+        'const m=require(' + JSON.stringify(__filename) + ');',
+        'const fs=require("fs"),path=require("path");',
+        'const dir=path.join(process.cwd(),".ai","memory",".lock"),owner=path.join(dir,"owner");',
+        // normal acquire/release removes its own lock + owner file:
+        'm.acquireLock();const stamped=fs.existsSync(owner);m.releaseLock();const cleaned=!fs.existsSync(dir);',
+        // acquire, then simulate a stale-break reassigning ownership to another process;
+        // releaseLock must see the foreign token and leave the lock in place:
+        'm.acquireLock();fs.writeFileSync(owner,"99999-deadbeef");m.releaseLock();const survived=fs.existsSync(dir);',
+        'process.stdout.write(JSON.stringify({stamped,cleaned,survived}));',
+      ].join('');
+      let lockRes = {};
+      try { lockRes = JSON.parse(cp.execFileSync(process.execPath, ['-e', probe], { cwd: tmp, encoding: 'utf8' })); } catch (e) { lockRes = {}; }
+      check('F7: acquireLock stamps an owner token file', lockRes.stamped === true);
+      check('F7: normal releaseLock removes its own lock', lockRes.cleaned === true);
+      check('F7: releaseLock leaves a lock reassigned to another owner (no cross-delete)', lockRes.survived === true);
+      try { fs.rmSync(path.join(tmp, '.ai', 'memory', '.lock'), { recursive: true, force: true }); } catch (e) { /* cleanup */ }
+    }
 
     // --- write-back primitive ①: evidence-based staleness ---
     // Clock fallback (tmp is not a git repo): an old UPDATED must flag stale.
