@@ -10,7 +10,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml/badge.svg)](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-2.7-orange.svg)](ROADMAP.md)
+[![Version](https://img.shields.io/badge/version-2.8-orange.svg)](ROADMAP.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 Code Recall is a tiny **local decision ledger** for AI coding agents. It holds the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — in plain Markdown, and a SessionStart/PreCompact hook **re-injects it in front of the agent the moment context is lost** (session start, resume, before compaction). Not a memory database; not the cloud; not a governance platform. Zero dependencies, stays in the repo, the same setup across **Claude Code / Cursor / Gemini CLI**. Think **"Git for decisions" that survives compaction.**
@@ -72,7 +72,7 @@ Code Recall follows a "subtractive" philosophy: condense memory into a few stati
 - **🍃 Zero-dependency:** no DB, no background service, no network, zero npm runtime deps; 100% local files, code never leaves.
 - **🛡️ Compaction survival:** PreCompact snapshots before compaction; the post-compaction session re-anchors with the full TASK.md — the strongest in its class, backed by a [CI regression test](#-selftest--ci).
 - **🤝 Cross-tool:** one `.ai/memory/`, read by every IDE/CLI via the `AGENTS.md` protocol; `git clone` carries it along.
-- **⚡ Token discipline:** only a ≤200-token digest is injected each session (the whole ledger is **not** stuffed into context); zero cost in non-Code-Recall projects.
+- **⚡ Token discipline:** only a compact, budget-capped digest is injected each session — the digest's fence content is hard-capped (~1.2 KB, a few hundred tokens), so the whole ledger is **not** stuffed into context; zero cost in non-Code-Recall projects.
 - **🔎 Searchable:** zero-dep BM25 lexical search (English & Chinese), covering cross-month recall.
 - **🧹 Anti-rot:** temporal/supersede/expire model + `doctor` lint + an optional git pre-commit gate minimize "stale ledger misleads you."
 - **🚨 Fail-loud, not fail-silent:** tolerant `TASK.md` parsing + digest/`doctor` warnings surface a malformed or append-drifted ledger — a missing-colon `NOW`, multiple `NOW` lines (appending instead of rewriting), or a `NOW` that's actually finished work — **before** the agent re-anchors to it, instead of silently shipping an empty/misleading anchor. Authored ADR fields are never silently truncated on write. (Hardened via a 3-round adversarial review against a real project whose ledger had drifted.)
@@ -142,9 +142,11 @@ node coderecall.js <command>      # or, after publish: npx coderecall <command>
 | `status` | Show GOAL/NOW/NEXT, checklist, file sizes, drift, freshness |
 | `doctor [--selftest]` | Health check (hooks/ledger/paths/lint/Codex 32KiB); `--selftest` also runs the regression test |
 | `score [--json]` | Rate working-state health (GOAL clarity / NEXT actionability / blockers reasoned / freshness) |
-| `decision "<title>" [--context/--decision/--consequences/--status/--confidence] [--supersedes "<old title/substr>"]` | Record an ADR decision in one line; `--supersedes` explicitly retires a prior decision (independent of title similarity) |
-| `search <query> [--limit N] [--history]` | Lexical search — **current truth only by default** (superseded/deprecated/archive excluded); `--history` includes them (labeled `[superseded]`) |
+| `decision "<title>" [--context/--decision/--consequences/--status/--confidence] [--supersedes "<old title/substr>"] [--code "<path → symbol>"]` | Record an ADR decision in one line; `--supersedes` explicitly retires a prior decision (independent of title similarity); `--code` back-links the file/symbol it governs (`doctor` flags it if the path disappears) |
+| `search <query> [--limit N] [--history]` | Lexical search — **current truth only by default** (superseded/deprecated/resolved/obsolete/archive excluded); `--history` includes them (labeled `[superseded]` / `[resolved]`) |
 | `decisions [--all]` | **HEAD view:** list current accepted decisions (`--all` includes superseded/deprecated) |
+| `resolve-lesson "<title>" [--status resolved\|obsolete] [--note ".."]` | Retire a lesson whose root cause is fixed (`resolved`) or whose premise is gone (`obsolete`) — kept & searchable via `--history`, just dropped from default results (mark-over-delete) |
+| `reconfirm "<title>" [--file decisions\|lessons] [--confidence ..]` | Re-stamp a still-true entry's `updated:` (and optionally raise confidence) without rewriting it, so recency ranking + the staleness flag treat it as fresh |
 | `digest [--compact]` | Print the session-injection digest (debugging) |
 | `consolidate` | Archive done items (monthly), retire superseded/expired entries, dedupe, age-flag |
 | `snapshot` | Write a manual snapshot |
@@ -160,7 +162,7 @@ node coderecall.js <command>      # or, after publish: npx coderecall <command>
 
 Code Recall listens to AI-tool lifecycle hooks and accesses memory automatically:
 
-1. **Session Start** — read a ≤200-token digest from `.ai/memory/` and inject it as context.
+1. **Session Start** — read a compact, budget-capped digest (fence content ≤ ~1.2 KB, a few hundred tokens) from `.ai/memory/` and inject it as context.
 2. **Context Compaction** — `precompact.js` snapshots the transcript tail before compaction; the post-compaction session re-anchors with the **full TASK.md**.
 3. **End of turn** — `stop.js` maintains a heartbeat + a bounded `sessions.md` timeline.
 4. **Pull-based recall** — when needed, use `coderecall search` (BM25) or the MCP tools to fetch memory **on demand**, not permanently occupying context.
@@ -179,7 +181,7 @@ Code Recall listens to AI-tool lifecycle hooks and accesses memory automatically
         │                       │               │
 ┌───────▼────────┐   ┌──────────▼─────┐   ┌─────┴──────────┐
 │ sessionstart.js│   │  precompact.js │   │    stop.js     │
-│ digest ≤200 tok│   │ snapshot tail  │   │ heartbeat +    │
+│ compact digest │   │ snapshot tail  │   │ heartbeat +    │
 │ into context   │   │ of transcript  │   │ sessions line  │
 └───────▲────────┘   └──────────▲─────┘   └─────▲──────────┘
         │   Claude Code hooks (installed by install.ps1/.sh)
@@ -267,9 +269,17 @@ node coderecall.js selftest        # or doctor --selftest / npm test
 ```
 Simulates compaction in a throwaway project and **drives the real hook scripts** (sessionstart / precompact), asserting the re-anchor digest contains the full TASK body and that a snapshot is written. GitHub Actions runs it on **Linux + Windows × Node 18/20** on every push/PR — turning the headline claim into a reproducible regression test.
 
-### 🧹 Temporal / supersede / expire (zero-dep)
+### 🧹 Temporal / supersede / expire / reconfirm (zero-dep)
 
 DECISIONS/LESSONS support `expires:` (auto-forget on/after a date) and a supersede chain: writing an overlapping-title decision marks the old one `status: superseded` (kept, so evolution stays visible) by **code**, not a silent overwrite. `consolidate` retires superseded + expired entries to `archive/retired-YYYY-MM.md`. The links are code-maintained (not hand-written by the AI) and carry no traversal logic, so there are no orphans / cycles.
+
+Two more lifecycle moves, both **mark-over-delete** (an entry is never destroyed, only re-stamped — so a hard-won lesson stays reachable via `--history`):
+
+- **Lessons retire too:** `resolve-lesson "<title>"` marks a lesson `resolved` (root cause fixed, the pitfall no longer bites) or `obsolete` (the situation it warned about is gone). It leaves default search but stays in `--history`.
+- **Re-confirm what still holds:** `reconfirm "<title>"` refreshes an entry's `- updated:` date (and can re-raise confidence) **without rewriting it**. `updated:` (last-confirmed) is tracked separately from `date:` (first-recorded), and recency ranking + the staleness flag key off `updated:` — so a still-valid old decision you re-confirm ranks fresh instead of decaying.
+- **Navigable back-links:** an optional `- code: <path → symbol>` ties a decision/lesson to the file it's about; `doctor` flags it when that path disappears (the entry may be stale). URLs and bare symbols are skipped.
+
+> **What to record (recoverability test):** before writing, ask *could a competent engineer reconstruct this from the code as it stands?* If yes, don't record it — the ledger is for what code can't show (the why, the dead ends, the pitfalls), never for what reading the code would reveal.
 
 ### 🔌 Optional: MCP server (write-back as tool calls)
 
@@ -277,7 +287,7 @@ DECISIONS/LESSONS support `expires:` (auto-forget on/after a date) and a superse
 // Claude Desktop / Cursor / any MCP client
 { "mcpServers": { "coderecall": { "command": "node", "args": ["<path>/code-recall/coderecall.js", "mcp"] } } }
 ```
-Zero-dep stdio JSON-RPC exposing `read_memory` / `update_task` / `write_decision` / `write_lesson` / `search_memory`. Turns honor-system write-back into a tool call; files remain the storage layer, AGENTS.md still covers non-MCP tools.
+Zero-dep stdio JSON-RPC exposing `read_memory` / `update_task` / `write_decision` / `write_lesson` / `resolve_lesson` / `reconfirm` / `search_memory`. Turns honor-system write-back into a tool call; files remain the storage layer, AGENTS.md still covers non-MCP tools.
 
 ### ♻️ Current truth & influence governance
 
@@ -285,7 +295,7 @@ The most dangerous thing about long-term memory isn't *forgetting* — it's *wro
 
 - **Current/history split:** `search` and MCP `search_memory` **return current decisions only by default**; superseded/deprecated/archive don't appear. Add `--history` to include them (clearly labeled `[superseded]`). `decisions` gives the HEAD view.
 - **Explicit supersede:** `decision "new" --supersedes "old keyword"` retires the old decision directly — independent of title similarity.
-- **Weighted ranking:** recall score = `BM25 × statusWeight (accepted 1.0 / proposed 0.5 / deprecated 0.2 / superseded 0.05) × confidence × recency`. On an equal match, current/high-confidence/recent decisions rank first.
+- **Weighted ranking:** recall score = `BM25 × statusWeight (accepted/active 1.0 / proposed 0.5 / deprecated 0.2 / resolved 0.1 / superseded·obsolete 0.05) × confidence × recency`. On an equal match, current/high-confidence/recent decisions rank first.
 - **Surfacing:** every session / after compaction, the digest **surfaces the top-5 current decisions** (titles only, newest-first, **accepted only** — proposed/superseded/expired excluded). Bounded curated attention, not the whole log.
 - **Anti-re-litigation:** recording a decision that clearly overlaps an accepted one but is below the auto-supersede bar offers three resolutions: `--supersedes "X"`, `--confirm-new`, or revise the title.
 
