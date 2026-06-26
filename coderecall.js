@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.8.0.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.9.0.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -51,10 +51,11 @@ const STALE_REMINDER_MINUTES = 45;     // UserPromptSubmit reminder fires after 
 const CODEX_AGENTS_WARN_BYTES = 32768; // Codex CLI reads ~32KiB of AGENTS.md; warn beyond
 const GRADUATE_AGE_DAYS = 90;          // entries older than this + high confidence may graduate
 const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the digest (opt-in)
-const DIGEST_DECISIONS_TOPN = 5;       // current decisions surfaced in the digest (newest)
+const DIGEST_DECISIONS_TOPN = 12;      // newest current-decision TITLES listed in the resident HEAD index; header always carries the TOTAL count, overflow names the rest + how to pull them (anti-fragmentation). Bodies stay pull-on-demand; fence hard-cap is the final bound.
+const DIGEST_LESSONS_TOPN = 8;         // active-lesson TITLES surfaced alongside decisions (same anti-fragmentation rationale: the agent should SEE which pitfalls exist, not just their count). Listed after decisions so decisions win the shared fence budget.
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.8.0';
+const VERSION = '2.9.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -463,6 +464,28 @@ function entryStatus(entry) {
   return 'active';
 }
 
+/**
+ * Statuses meaning "no longer current truth" — excluded from default search,
+ * retired to archive by consolidate. DECISIONS use superseded/deprecated;
+ * LESSONS use resolved (root cause fixed, the pitfall no longer bites) /
+ * obsolete (the situation it warned about no longer exists). Kept (not deleted):
+ * a hard-won lesson stays searchable via --history even after it stops applying.
+ */
+const RETIRED_STATUSES = { superseded: 1, deprecated: 1, resolved: 1, obsolete: 1 };
+function isRetiredStatus(s) { return !!RETIRED_STATUSES[(s || '').toLowerCase()]; }
+
+/** Optional `- updated: YYYY-MM-DD` = last date the entry was confirmed still true. */
+function entryUpdated(entry) {
+  for (const l of entry.lines) {
+    const m = /^- updated:\s*(\d{4}-\d{2}-\d{2})/.exec(l);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/** Freshness date for ranking/aging: last-confirmed (`updated:`) if present, else creation `date:`. */
+function entryFreshness(entry) { return entryUpdated(entry) || entryDate(entry); }
+
 /** Optional `- expires: YYYY-MM-DD`; returns the date string or null. */
 function entryExpires(entry) {
   for (const l of entry.lines) {
@@ -512,7 +535,7 @@ function serializeEntries(parsed) {
  * fresh entry records `supersedes: <old>`. `consolidate` later retires superseded
  * (and expired) entries to archive. Returns 'appended' or 'superseded'.
  */
-function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMatch) {
+function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMatch, extra) {
   return withLock(() => {
     const text = readFileSafe(filePath);
     if (text === null) fail('missing ' + filePath);
@@ -530,7 +553,20 @@ function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMa
         ' chars and was truncated; split it into shorter lines to preserve the full text.\n');
     }
     const st = /^(?:proposed|accepted|superseded|deprecated)$/.test(status || '') ? status : 'accepted';
-    const freshLines = ['## ' + title, '- date: ' + todayDate(), '- status: ' + st, '- confidence: ' + (confidence || 'med')];
+    // `updated:` starts equal to `date:` (just confirmed, because just written); it
+    // diverges later when an entry is re-confirmed without being rewritten.
+    const freshLines = ['## ' + title, '- date: ' + todayDate(), '- updated: ' + todayDate(), '- status: ' + st, '- confidence: ' + (confidence || 'med')];
+    // Optional `code:` back-link — the file (and optionally → symbol) this entry is
+    // about, so the decision/lesson is navigable and doctor can flag it stale when
+    // the referenced path disappears. Single line; newlines collapsed.
+    const codeRef = extra && extra.code ? String(extra.code).replace(/[\r\n]+/g, ' ').trim() : '';
+    if (codeRef) freshLines.push('- code: ' + codeRef);
+    // Optional `aliases:` — free-text alternative search terms (synonyms, the old
+    // name of a thing, related jargon). The whole entry is the BM25 search text, so
+    // these terms make the entry findable by words that aren't in its title/body —
+    // a zero-dep mitigation for lexical search missing synonyms. Single line.
+    const aliases = extra && extra.aliases ? String(extra.aliases).replace(/[\r\n]+/g, ' ').trim() : '';
+    if (aliases) freshLines.push('- aliases: ' + aliases);
     // P2 — explicit supersede: when supersedeMatch is given, retire the active
     // entry whose TITLE CONTAINS it (case-insensitive), regardless of title
     // overlap (fixes the brittle >0.8-Jaccard auto-match for reworded titles).
@@ -539,7 +575,7 @@ function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMa
     let supersededTitle = null;
     for (const e of parsed.entries) {
       const est = entryStatus(e);
-      if (est === 'superseded' || est === 'deprecated') continue;
+      if (isRetiredStatus(est)) continue; // never resurrect a retired entry as the supersede target
       const hit = matchLc
         ? e.title.toLowerCase().indexOf(matchLc) !== -1
         : titleOverlap(e.title, title) > TITLE_OVERLAP_THRESHOLD;
@@ -554,6 +590,45 @@ function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMa
     parsed.entries.push({ title, lines: freshLines.concat(clean) });
     writeFileAtomic(filePath, serializeEntries(parsed));
     return supersededTitle ? 'superseded' : 'appended';
+  });
+}
+
+/**
+ * Update meta on the ACTIVE entry whose title contains `titleSub`
+ * (case-insensitive). Used by `reconfirm` (refresh `updated:`, optionally re-raise
+ * confidence) and `resolve-lesson` (mark resolved/obsolete). Mark-over-delete: this
+ * never removes an entry, only re-stamps it. A mutation must hit exactly one entry:
+ * if the substring matches several active titles, returns { matched:false, ambiguous }
+ * with the candidates rather than silently re-stamping the first. Returns { matched,
+ * title } on success.
+ */
+function updateEntryMeta(filePath, titleSub, changes) {
+  changes = changes || {};
+  if (changes.confidence && !/^(?:high|med|low)$/.test(changes.confidence)) {
+    fail('invalid confidence "' + changes.confidence + '" (high|med|low)');
+  }
+  if (changes.status && !/^(?:proposed|accepted|superseded|deprecated|resolved|obsolete)$/.test(changes.status)) {
+    fail('invalid status "' + changes.status + '"');
+  }
+  return withLock(() => {
+    const text = readFileSafe(filePath);
+    if (text === null) fail('missing ' + filePath);
+    const sub = (titleSub || '').trim().toLowerCase();
+    if (!sub) return { matched: false };
+    const parsed = parseEntries(text);
+    const matches = parsed.entries.filter(
+      (e) => !isRetiredStatus(entryStatus(e)) && e.title.toLowerCase().indexOf(sub) !== -1);
+    if (matches.length === 0) return { matched: false };
+    if (matches.length > 1) return { matched: false, ambiguous: matches.map((e) => e.title) };
+    const hit = matches[0];
+    if (changes.status) setEntryField(hit, 'status', changes.status);
+    if (changes.confidence) setEntryField(hit, 'confidence', changes.confidence);
+    if (changes.touch !== false) setEntryField(hit, 'updated', todayDate());
+    if (changes.note) {
+      for (const l of splitLines(sanitize(String(changes.note), { authored: true }))) hit.lines.push(l);
+    }
+    writeFileAtomic(filePath, serializeEntries(parsed));
+    return { matched: true, title: hit.title };
   });
 }
 
@@ -606,18 +681,43 @@ function topGlobalLessons(n) {
   return entries.slice(-n).reverse().map((e) => e.title);
 }
 
-/** Titles of the current (non-superseded/deprecated/expired) decisions, newest first, capped at n. */
+// Returns { titles, total }: the newest `n` CURRENT decision titles AND the total
+// current count. The digest renders these as a resident HEAD index so the agent always
+// sees how many decisions exist (it can never silently miss one → no re-litigation of
+// an unseen decision); bodies stay pull-on-demand via `search`/`decisions`.
 function currentDecisions(n) {
   const text = readFileSafe(DECISIONS_FILE);
-  if (text === null) return [];
-  const active = parseEntries(text).entries.filter((e) => {
+  if (text === null) return { titles: [], total: 0 };
+  const active = parseEntries(text).entries.map((e, i) => ({ e, i })).filter(({ e }) => {
     const st = entryStatus(e);
     // Surface CURRENT TRUTH only: accepted/active. `proposed` is still under
-    // consideration (not yet decided); superseded/deprecated/expired are history.
-    return st !== 'superseded' && st !== 'deprecated' && st !== 'proposed' && !entryExpired(e);
+    // consideration (not yet decided); retired (superseded/deprecated/resolved/
+    // obsolete) + expired are history.
+    return !isRetiredStatus(st) && st !== 'proposed' && !entryExpired(e);
   });
-  active.sort((a, b) => (entryDate(b) || '').localeCompare(entryDate(a) || ''));
-  return active.slice(0, n).map((e) => e.title);
+  // Newest first by date; tie-break by append order (entries are appended, so a
+  // higher index = written later = newer) — keeps "newest" honest when many entries
+  // share a date (common: several decisions in one day would otherwise list oldest-first).
+  active.sort((a, b) => {
+    const c = (entryDate(b.e) || '').localeCompare(entryDate(a.e) || '');
+    return c !== 0 ? c : b.i - a.i;
+  });
+  return { titles: active.slice(0, n).map(({ e }) => e.title), total: active.length };
+}
+
+// Returns { titles, total } for ACTIVE lessons (not resolved/obsolete/expired),
+// newest first. Same anti-fragmentation rationale as currentDecisions: surface which
+// pitfalls exist so the agent doesn't repeat one it never saw; bodies stay on-demand.
+function currentLessons(n) {
+  const text = readFileSafe(LESSONS_FILE);
+  if (text === null) return { titles: [], total: 0 };
+  const active = parseEntries(text).entries.map((e, i) => ({ e, i }))
+    .filter(({ e }) => !isRetiredStatus(entryStatus(e)) && !entryExpired(e));
+  active.sort((a, b) => {
+    const c = (entryDate(b.e) || '').localeCompare(entryDate(a.e) || '');
+    return c !== 0 ? c : b.i - a.i;
+  });
+  return { titles: active.slice(0, n).map(({ e }) => e.title), total: active.length };
 }
 
 /**
@@ -683,14 +783,36 @@ function buildDigest(opts) {
       ledgerParts.push(neutralizeLedger(sanitize('Blocked: ' + b.trim())));
     }
   }
-  // Surfacing (P-surfacing): inject the top current decisions so the agent SEES
-  // them every session / after compaction — "keep effective decisions influential".
-  // Bounded (newest N accepted, titles only); none on a fresh ledger.
-  const decns = currentDecisions(DIGEST_DECISIONS_TOPN);
-  if (decns.length) {
+  // Surfacing (P-surfacing) → resident HEAD index: list current decision TITLES
+  // newest-first so the agent sees the whole decision space every session / after
+  // compaction — not just a top few (which silently hides the rest → fragmentation:
+  // the agent re-decides or contradicts a decision it never knew existed). Titles only;
+  // bodies stay pull-on-demand. The header ALWAYS carries the total count and, when the
+  // list is capped, an overflow line names how many are unshown + how to reach them — so
+  // the map is never SILENTLY partial. Bounded by DIGEST_DECISIONS_TOPN + the fence cap.
+  const { titles: decns, total: decTotal } = currentDecisions(DIGEST_DECISIONS_TOPN);
+  if (decTotal) {
+    const capped = decns.length < decTotal;
     ledgerParts.push('');
-    ledgerParts.push('Current decisions (' + decns.length + ', newest first — read before proposing changes):');
+    ledgerParts.push(capped
+      ? 'Current decisions — ' + decns.length + ' of ' + decTotal +
+        ' shown (newest first, titles only; run `decisions` for all, `search <topic>` for bodies):'
+      : 'Current decisions (' + decTotal + ', newest first — read before proposing changes):');
     for (const d of decns) ledgerParts.push(neutralizeLedger(sanitize('- ' + d)));
+    if (capped) ledgerParts.push('- … +' + (decTotal - decns.length) + ' more current decision(s) not shown — `decisions` lists every title.');
+  }
+  // Active lessons get the same resident title index (symmetry: the agent should SEE
+  // which pitfalls exist, not just a footer count, so it doesn't repeat one it never
+  // saw). Listed AFTER decisions so decisions win the shared fence budget when capped.
+  const { titles: lsns, total: lsnTotal } = currentLessons(DIGEST_LESSONS_TOPN);
+  if (lsnTotal) {
+    const lcapped = lsns.length < lsnTotal;
+    ledgerParts.push('');
+    ledgerParts.push(lcapped
+      ? 'Active lessons — ' + lsns.length + ' of ' + lsnTotal + ' shown (pitfalls; `search <topic>` for the why):'
+      : 'Active lessons (' + lsnTotal + ' — do not retry these):');
+    for (const l of lsns) ledgerParts.push(neutralizeLedger(sanitize('- ' + l)));
+    if (lcapped) ledgerParts.push('- … +' + (lsnTotal - lsns.length) + ' more — `search <topic>` to surface.');
   }
   // Optional cross-project lessons (opt-in: CODE_RECALL_GLOBAL_LESSONS=1). Off by
   // default so non-opted projects pay nothing.
@@ -1186,8 +1308,8 @@ function scoreWorkingState() {
   else dims.push({ key: 'freshness', w: 15, score: 10, why: age.toFixed(1) + 'h stale' });
 
   // GROUNDING (minor) — is the work backed by recorded reasoning?
-  const dN = parseEntries(readFileSafe(DECISIONS_FILE) || '').entries.filter((e) => entryStatus(e) !== 'superseded').length;
-  const lN = parseEntries(readFileSafe(LESSONS_FILE) || '').entries.filter((e) => entryStatus(e) !== 'superseded').length;
+  const dN = parseEntries(readFileSafe(DECISIONS_FILE) || '').entries.filter((e) => !isRetiredStatus(entryStatus(e))).length;
+  const lN = parseEntries(readFileSafe(LESSONS_FILE) || '').entries.filter((e) => !isRetiredStatus(entryStatus(e))).length;
   dims.push({ key: 'grounding', w: 5, score: (dN + lN) > 0 ? 100 : 60, why: (dN + lN) > 0 ? dN + ' decisions, ' + lN + ' lessons on file' : 'no decisions/lessons recorded yet' });
 
   const wsum = dims.reduce((a, d) => a + d.w, 0);
@@ -1233,7 +1355,7 @@ function ledgerLintIssues() {
       const stMatch = /^- status:\s*(\S+)\s*$/m.exec(body);
       if (!/^- date:\s*\d{4}-\d{2}-\d{2}\s*$/m.test(body)) issues.push(label + ' entry "' + e.title + '" — bad/missing date');
       else if (!/^- confidence:\s*(?:high|med|low)\s*$/m.test(body)) issues.push(label + ' entry "' + e.title + '" — bad/missing confidence');
-      else if (stMatch && !/^(?:proposed|accepted|superseded|deprecated)$/.test(stMatch[1])) issues.push(label + ' entry "' + e.title + '" — invalid status "' + stMatch[1] + '" (proposed|accepted|superseded|deprecated)');
+      else if (stMatch && !/^(?:proposed|accepted|superseded|deprecated|active|resolved|obsolete)$/.test(stMatch[1])) issues.push(label + ' entry "' + e.title + '" — invalid status "' + stMatch[1] + '" (proposed|accepted|superseded|deprecated|resolved|obsolete)');
     }
   }
   for (const l of splitLines(readFileSafe(TASK_FILE) || '')) {
@@ -1301,6 +1423,33 @@ function cmdDoctor() {
   const lintIssues = ledgerLintIssues();
   if (lintIssues.length === 0) ok('all entries + checklist states well-formed');
   else for (const m of lintIssues) warn(m);
+
+  // 2c. Code-link staleness — entries with a `code:` back-link whose path no
+  // longer exists are likely stale (the file moved/was deleted; the decision or
+  // pitfall may no longer apply). Lenient: only flags links we can resolve to a
+  // clearly-missing path; bare symbols / URLs are skipped.
+  console.log('[code-links]');
+  let linkChecked = 0, linkStale = 0;
+  for (const [label, p] of [['DECISIONS.md', DECISIONS_FILE], ['LESSONS.md', LESSONS_FILE]]) {
+    const text = readFileSafe(p);
+    if (text === null) continue;
+    for (const e of parseEntries(text).entries) {
+      if (isRetiredStatus(entryStatus(e))) continue;
+      const ref = entryField(e, 'code');
+      if (!ref) continue;
+      // Take the path portion: strip backticks, drop anything after → / -> (the symbol).
+      const pathPart = ref.replace(/`/g, '').split(/\s*(?:→|->)\s*/)[0].trim();
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(pathPart)) continue; // URL, not a local path — skip
+      if (!pathPart || !/[\/\\.]/.test(pathPart)) continue; // not path-like (no separator/ext) — skip
+      linkChecked++;
+      if (!fs.existsSync(path.join(CWD, pathPart))) {
+        linkStale++;
+        warn(label + ' entry "' + e.title + '" — code: ' + pathPart + ' no longer exists; reconfirm, update the link, or retire the entry');
+      }
+    }
+  }
+  if (linkChecked === 0) ok('no code: back-links to verify');
+  else if (linkStale === 0) ok(linkChecked + ' code: back-link(s) resolve to existing paths');
 
   // 3. Hooks in ~/.claude/settings.json
   // (path overridable via CODE_RECALL_SETTINGS for testing; default unchanged)
@@ -1494,8 +1643,7 @@ function consolidateLocked(opts) {
     // 2a. Retire superseded/deprecated (ADR status lifecycle) + expired (auto-forget).
     const retired = [];
     let active = parsed.entries.filter((e) => {
-      const st = entryStatus(e);
-      if (st === 'superseded' || st === 'deprecated' || entryExpired(e)) { retired.push(e); return false; }
+      if (isRetiredStatus(entryStatus(e)) || entryExpired(e)) { retired.push(e); return false; }
       return true;
     });
     // 2b. Legacy safety dedupe among the remaining active entries (covers
@@ -1517,7 +1665,7 @@ function consolidateLocked(opts) {
     // 2c. Flag entries older than GRADUATE_AGE_DAYS as confidence: low.
     let flagged = 0;
     for (const e of keep) {
-      const d = entryDate(e);
+      const d = entryFreshness(e); // age from last-confirmed, not first-written
       if (d && Date.parse(d) < cutoff) {
         const before = e.lines.join('\n');
         setEntryField(e, 'confidence', 'low');
@@ -1602,7 +1750,7 @@ function paragraphs(text) {
  */
 // Retrieval weighting (P3): an entry's influence = relevance × lifecycle.
 function statusWeight(s) {
-  const w = { accepted: 1, active: 1, proposed: 0.5, deprecated: 0.2, superseded: 0.05 };
+  const w = { accepted: 1, active: 1, proposed: 0.5, deprecated: 0.2, resolved: 0.1, superseded: 0.05, obsolete: 0.05 };
   return (s && w[s] !== undefined) ? w[s] : 1;
 }
 function confidenceWeight(c) {
@@ -1618,7 +1766,7 @@ function recencyWeight(date) {
   return 1 - ((age - 90) / 275) * 0.4;
 }
 function chunkIsHistory(c) {
-  return c.status === 'superseded' || c.status === 'deprecated' || c.archived || c.expired;
+  return isRetiredStatus(c.status) || c.archived || c.expired;
 }
 
 /**
@@ -1642,9 +1790,10 @@ function collectChunks(opts) {
     for (const e of parseEntries(text).entries) {
       const status = entryStatus(e);
       const expired = entryExpired(e);
-      const history = status === 'superseded' || status === 'deprecated' || expired;
+      const history = isRetiredStatus(status) || expired;
       if (history && !includeHistory) continue;
-      chunks.push({ source: label, label: e.title, text: e.lines.join('\n'), status, confidence: entryField(e, 'confidence') || 'med', date: entryDate(e), expired });
+      // recency keys off last-confirmed (`updated:`) so a re-confirmed old entry ranks fresh.
+      chunks.push({ source: label, label: e.title, text: e.lines.join('\n'), status, confidence: entryField(e, 'confidence') || 'med', date: entryFreshness(e), expired });
     }
   }
   if (includeHistory) {
@@ -2376,6 +2525,16 @@ function cmdSelftest() {
     run(['decision', 'Selftest decision', '--context', 'c', '--decision', 'd', '--consequences', 'q']);
     const decText = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
     check('decision CLI writes an ADR entry', /## Selftest decision/.test(decText) && /- status: accepted/.test(decText) && /\*\*Decision:\*\* d/.test(decText));
+    // New: every fresh entry carries `- updated:` (last-confirmed) starting == date.
+    check('decision write stamps an updated: line', /## Selftest decision[\s\S]*?- updated: \d{4}-\d{2}-\d{2}/.test(decText));
+    // New: --code records a navigable back-link.
+    run(['decision', 'Coded decision', '--decision', 'x', '--code', 'src/pay/charge.ts → chargeCard']);
+    const codedText = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+    check('decision --code writes a code: back-link', /## Coded decision[\s\S]*?- code: src\/pay\/charge\.ts → chargeCard/.test(codedText));
+    // --aliases makes an entry findable by synonyms absent from its title/body
+    // (zero-dep mitigation for lexical search missing synonyms).
+    run(['decision', 'Container orchestration platform', '--decision', 'run it there', '--aliases', 'kubernetes k8s helm']);
+    check('search finds a decision by an alias term not in its title/body', /Container orchestration platform/.test(run(['search', 'k8s'])));
     // Regression: a long ADR field must NOT be truncated to 200 chars nor get a
     // " […]" marker on write (the secret-sanitizer's transcript cap once leaked
     // both into the canonical ledger). Authored content keeps secret redaction but
@@ -2409,6 +2568,74 @@ function cmdSelftest() {
     run(['decision', 'Maybe evaluate GraphQL', '--decision', 'spike only', '--status', 'proposed']);
     const dig3 = run(['digest']);
     check('digest excludes proposed decisions from surfacing', !/Maybe evaluate GraphQL/.test(dig3));
+    // Resident HEAD index: when current decisions exceed DIGEST_DECISIONS_TOPN, the
+    // digest header carries the TOTAL count and an overflow line names the rest +
+    // how to pull them — the map is never SILENTLY partial (anti-fragmentation).
+    {
+      const idxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-decidx-'));
+      try {
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: idxDir, stdio: 'ignore' });
+        const irun = (a) => cp.execFileSync(process.execPath, [__filename].concat(a), { cwd: idxDir, encoding: 'utf8' });
+        const N = 15; // > DIGEST_DECISIONS_TOPN (12)
+        for (let i = 1; i <= N; i++) irun(['decision', 'Indexed decision number ' + i, '--decision', 'd' + i]);
+        const idig = irun(['digest']);
+        check('digest decision index header shows "shown of total"', new RegExp('Current decisions — 12 of ' + N + ' shown').test(idig));
+        check('digest decision index emits an overflow pointer to `decisions`', /\+3 more current decision\(s\) not shown — `decisions` lists every title/.test(idig));
+        check('digest decision index lists the newest title', /Indexed decision number 15/.test(idig));
+        // Below the cap → plain header with the full count, no overflow line.
+        const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-decidx2-'));
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: sdir, stdio: 'ignore' });
+        cp.execFileSync(process.execPath, [__filename, 'decision', 'Only decision', '--decision', 'd'], { cwd: sdir, stdio: 'ignore' });
+        const sdig = cp.execFileSync(process.execPath, [__filename, 'digest'], { cwd: sdir, encoding: 'utf8' });
+        check('digest decision index: under cap uses the plain full-count header', /Current decisions \(1, newest first/.test(sdig) && !/of 1 shown/.test(sdig));
+      } finally { try { fs.rmSync(idxDir, { recursive: true, force: true }); } catch (e) {} }
+    }
+    // LESSONS lifecycle: resolved/obsolete lessons retire from default search but
+    // stay reachable via --history (mark-over-delete), mirroring decisions.
+    {
+      const lf = path.join(tmp, '.ai', 'memory', 'LESSONS.md');
+      fs.writeFileSync(lf, ['# LESSONS', '',
+        '## Retry storm on the flaky upload endpoint',
+        '- date: 2026-01-01', '- updated: 2026-01-01', '- confidence: high',
+        'Naive retries hammered the upload endpoint; root cause was no backoff.', ''].join('\n'), 'utf8');
+      // Resident lessons index: an active lesson's TITLE surfaces in the digest
+      // (not just the footer count), so the agent sees which pitfalls exist.
+      const ldig = run(['digest']);
+      check('digest surfaces active lesson titles (resident index)', /Active lessons/.test(ldig) && /Retry storm on the flaky upload/.test(ldig));
+      const before = run(['search', 'upload']);
+      check('active lesson appears in default search', /Retry storm on the flaky upload/.test(before));
+      const rl = run(['resolve-lesson', 'flaky upload', '--status', 'resolved', '--note', 'fixed: added exponential backoff']);
+      check('resolve-lesson reports the retire', /marked .*resolved/.test(rl));
+      const lfText = fs.readFileSync(lf, 'utf8');
+      check('resolve-lesson sets status + note + refreshes updated', /- status: resolved/.test(lfText) && /exponential backoff/.test(lfText) && new RegExp('- updated: ' + todayDate()).test(lfText));
+      const after = run(['search', 'upload']);
+      check('resolved lesson hides from default search', !/Retry storm on the flaky upload/.test(after));
+      const afterHist = run(['search', 'upload', '--history']);
+      check('resolved lesson surfaces under --history, labeled', /Retry storm on the flaky upload/.test(afterHist) && /\[resolved\]/.test(afterHist));
+      // reconfirm refreshes updated: on an active entry without rewriting it.
+      run(['decision', 'Pin Node to LTS', '--decision', 'reproducible builds']);
+      const rc = run(['reconfirm', 'Pin Node to LTS', '--confidence', 'high']);
+      check('reconfirm reports the re-stamp', /reconfirmed "Pin Node to LTS"/.test(rc));
+      // doctor flags a code: link whose path no longer exists.
+      run(['decision', 'Ghost-file decision', '--decision', 'y', '--code', 'src/does/not/exist.ts → gone']);
+      const doc = run(['doctor']);
+      check('doctor flags a dangling code: back-link', /code: src\/does\/not\/exist\.ts no longer exists/.test(doc));
+      // doctor does NOT flag a URL code: link as a missing local path.
+      run(['decision', 'External spec decision', '--decision', 'z', '--code', 'https://example.com/spec/foo.ts']);
+      const docUrl = run(['doctor']);
+      check('doctor ignores a URL code: back-link', !/example\.com\/spec\/foo\.ts no longer exists/.test(docUrl));
+      // reconfirm refuses an invalid confidence rather than writing it (exits non-zero).
+      let badConfRejected = false;
+      try { run(['reconfirm', 'Pin Node to LTS', '--confidence', 'bogus']); }
+      catch (e) { badConfRejected = /invalid confidence/.test(String(e.stderr || e.message)); }
+      const lfd = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+      check('reconfirm rejects an invalid confidence', badConfRejected && !/- confidence: bogus/.test(lfd));
+      // ambiguous title is refused for mutation (lists candidates, touches nothing).
+      run(['decision', 'Cache layer A', '--decision', 'a']);
+      run(['decision', 'Cache layer B', '--decision', 'b']);
+      const amb = run(['reconfirm', 'Cache layer']);
+      check('reconfirm refuses an ambiguous title and lists candidates', /matches 2 active entries/.test(amb) && /Cache layer A/.test(amb) && /Cache layer B/.test(amb));
+    }
     // graduate → conventional ADR files (and the accepted-status filter fix).
     // Clock-relative old date so the >90d gate holds regardless of CI's date.
     const oldDate = new Date(Date.now() - 200 * 86400000).toISOString().slice(0, 10);
@@ -2493,14 +2720,14 @@ function cmdDecision(args) {
     } else positional.push(a);
   }
   const title = positional.join(' ').trim();
-  const usage = 'usage: node coderecall.js decision "<title>" [--context .. --decision .. --consequences ..] [--supersedes "<old title/substr>"] [--confirm-new] [--status proposed|accepted|deprecated] [--confidence high|med|low]  (or --body "..")';
+  const usage = 'usage: node coderecall.js decision "<title>" [--context .. --decision .. --consequences ..] [--supersedes "<old title/substr>"] [--confirm-new] [--status proposed|accepted|deprecated] [--confidence high|med|low] [--code "<path → symbol>"] [--aliases "<synonyms/old names>"]  (or --body "..")';
   if (!title) fail(usage);
   const body = composeAdrBody({ body: opts.body, context: opts.context, decision: opts.decision, consequences: opts.consequences });
   if (!body) fail('provide --body, or at least one of --context / --decision / --consequences\n' + usage);
   const status = /^(?:proposed|accepted|deprecated)$/.test(opts.status || '') ? opts.status : 'accepted';
   const confirmNew = !!(opts['confirm-new'] || opts.distinct);
   const near = (opts.supersedes || confirmNew) ? null : nearMatchDecision(title);
-  const res = upsertEntry(DECISIONS_FILE, title, splitLines(body), opts.confidence, status, opts.supersedes);
+  const res = upsertEntry(DECISIONS_FILE, title, splitLines(body), opts.confidence, status, opts.supersedes, { code: opts.code, aliases: opts.aliases });
   console.log('DECISIONS.md: ' + res + ' — "' + title + '" [' + status + ']' +
     (res === 'superseded' && opts.supersedes ? ' (superseded a prior decision matching "' + opts.supersedes + '")' : ''));
   if (near && res !== 'superseded') {
@@ -2511,6 +2738,50 @@ function cmdDecision(args) {
   }
 }
 
+// Parse "--key value" / "--flag" args into an opts object + positional list.
+function parseFlagArgs(args, boolKeys) {
+  const BOOL = boolKeys || {};
+  const opts = {};
+  const positional = [];
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (a.indexOf('--') === 0) {
+      const key = a.slice(2);
+      if (BOOL[key]) opts[key] = true; else { opts[key] = args[i + 1]; i++; }
+    } else positional.push(a);
+  }
+  return { opts, positional };
+}
+
+// resolve-lesson — retire a LESSONS entry whose root cause was fixed (resolved)
+// or whose premise no longer holds (obsolete). Kept + searchable via --history.
+function cmdResolveLesson(args) {
+  requireLedger();
+  const { opts, positional } = parseFlagArgs(args);
+  const title = positional.join(' ').trim();
+  if (!title) fail('usage: node coderecall.js resolve-lesson "<title substring>" [--status resolved|obsolete] [--note ".."]');
+  const st = opts.status === 'obsolete' ? 'obsolete' : 'resolved';
+  const r = updateEntryMeta(LESSONS_FILE, title, { status: st, note: opts.note });
+  if (r.ambiguous) { console.log('"' + title + '" matches ' + r.ambiguous.length + ' active lessons; narrow the title:\n  - ' + r.ambiguous.join('\n  - ')); return; }
+  if (!r.matched) { console.log('No active lesson matched "' + title + '".'); return; }
+  console.log('LESSONS.md: marked "' + r.title + '" ' + st + ' (kept; excluded from default search, surfaced by --history).');
+}
+
+// reconfirm — re-stamp a still-true entry's `updated:` (and optionally confidence)
+// without rewriting it, so recency ranking + staleness flagging treat it as fresh.
+function cmdReconfirm(args) {
+  requireLedger();
+  const { opts, positional } = parseFlagArgs(args);
+  const title = positional.join(' ').trim();
+  if (!title) fail('usage: node coderecall.js reconfirm "<title substring>" [--file decisions|lessons] [--confidence high|med|low]');
+  const file = opts.file === 'lessons' ? LESSONS_FILE : DECISIONS_FILE;
+  const label = opts.file === 'lessons' ? 'LESSONS.md' : 'DECISIONS.md';
+  const r = updateEntryMeta(file, title, { confidence: opts.confidence });
+  if (r.ambiguous) { console.log('"' + title + '" matches ' + r.ambiguous.length + ' active entries in ' + label + '; narrow the title:\n  - ' + r.ambiguous.join('\n  - ')); return; }
+  if (!r.matched) { console.log(label + ': no active entry matched "' + title + '".'); return; }
+  console.log(label + ': reconfirmed "' + r.title + '" as of ' + todayDate() + (opts.confidence ? ' (confidence ' + opts.confidence + ')' : '') + '.');
+}
+
 // ---------------------------------------------------------------------------
 // decisions — the HEAD view: list the CURRENT accepted decisions (Git-HEAD,
 // not "most similar"). --all includes superseded/deprecated (labeled).
@@ -2518,7 +2789,7 @@ function cmdDecision(args) {
 function cmdDecisions(all) {
   requireLedger();
   const entries = parseEntries(readFileSafe(DECISIONS_FILE) || '').entries;
-  const rows = entries.filter((e) => all || !(entryStatus(e) === 'superseded' || entryStatus(e) === 'deprecated' || entryExpired(e)));
+  const rows = entries.filter((e) => all || !(isRetiredStatus(entryStatus(e)) || entryExpired(e)));
   if (rows.length === 0) { console.log(all ? 'No decisions recorded.' : 'No current decisions. (add --all for superseded/deprecated, or `decision` to record one)'); return; }
   console.log('coderecall decisions — ' + rows.length + (all ? ' total' : ' current (HEAD)') + ':');
   console.log('');
@@ -2644,11 +2915,15 @@ function mcpToolDefs() {
       inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'update_task', description: 'Update TASK.md GOAL/NOW/NEXT. Provide any subset.',
       inputSchema: { type: 'object', properties: { goal: { type: 'string' }, now: { type: 'string' }, next: { type: 'string' } }, additionalProperties: false } },
-    { name: 'write_decision', description: 'Record an ADR-grade decision (DECISIONS.md): why + what + consequences. Provide either `body`, or structured `context`/`decision`/`consequences`. Use `supersedes` to explicitly retire a prior decision by title substring.',
-      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, supersedes: { type: 'string' }, confirmNew: { type: 'boolean', description: 'acknowledge a flagged overlap as a distinct decision (suppresses the re-litigation note)' }, status: { type: 'string', enum: ['proposed', 'accepted', 'deprecated'] }, confidence: conf }, required: ['title'], additionalProperties: false } },
-    { name: 'write_lesson', description: 'Record a lesson / failure + root cause (LESSONS.md).',
-      inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
-    { name: 'search_memory', description: 'BM25 lexical search, lifecycle-aware: returns CURRENT decisions by default (superseded/deprecated/archived excluded). Set `history:true` to include them.',
+    { name: 'write_decision', description: 'Record an ADR-grade decision (DECISIONS.md): why + what + consequences. Provide either `body`, or structured `context`/`decision`/`consequences`. Use `supersedes` to explicitly retire a prior decision by title substring. `code` optionally back-links the file (and → symbol) this decision governs. ONLY record what reading the current code could NOT recover (the why, the rejected paths) — skip anything a competent engineer would reconstruct from the code itself.',
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, supersedes: { type: 'string' }, code: { type: 'string', description: 'back-link, e.g. "src/payments/charge.ts → chargeCard"' }, aliases: { type: 'string', description: 'alternative search terms (synonyms / old names) so lexical search finds this by words not in the title/body' }, confirmNew: { type: 'boolean', description: 'acknowledge a flagged overlap as a distinct decision (suppresses the re-litigation note)' }, status: { type: 'string', enum: ['proposed', 'accepted', 'deprecated'] }, confidence: conf }, required: ['title'], additionalProperties: false } },
+    { name: 'write_lesson', description: 'Record a lesson / failure + root cause (LESSONS.md): "do not retry X because Y". `code` optionally back-links the file (and → symbol) the pitfall lives in. Record only what the code cannot tell you — a pitfall, a confirmed-intentional surprise, an API quirk; skip anything recoverable by reading the code.',
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, code: { type: 'string', description: 'back-link, e.g. "src/auth/session.ts → refresh"' }, aliases: { type: 'string', description: 'alternative search terms (synonyms / old names) so lexical search finds this by words not in the title/body' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
+    { name: 'resolve_lesson', description: 'Mark a LESSONS entry no longer current: `resolved` (root cause fixed, the pitfall no longer bites) or `obsolete` (the situation it warned about is gone). Mark-over-delete: the entry is kept and still searchable via history, just retired from default results so it stops constraining new work. Matches the first active lesson whose title contains `title`.',
+      inputSchema: { type: 'object', properties: { title: { type: 'string', description: 'title substring of the lesson to retire' }, status: { type: 'string', enum: ['resolved', 'obsolete'], description: 'default resolved' }, note: { type: 'string', description: 'optional one-line note on how/why it was resolved' } }, required: ['title'], additionalProperties: false } },
+    { name: 'reconfirm', description: 'Re-stamp an entry as still-true today without rewriting it: refreshes `updated:` (so recency ranking and the staleness flag treat it as fresh) and can re-raise `confidence`. Use when you verified an older decision/lesson still holds. Matches the first active entry whose title contains `title`.',
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, file: { type: 'string', enum: ['decisions', 'lessons'], description: 'default decisions' }, confidence: conf }, required: ['title'], additionalProperties: false } },
+    { name: 'search_memory', description: 'BM25 lexical search, lifecycle-aware: returns CURRENT truth by default (superseded/deprecated/resolved/obsolete/archived excluded). Set `history:true` to include them.',
       inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer' }, history: { type: 'boolean' } }, required: ['query'], additionalProperties: false } },
     { name: 'list_decisions', description: 'List CURRENT (accepted) decisions — the HEAD view. Set `all:true` to include superseded/deprecated.',
       inputSchema: { type: 'object', properties: { all: { type: 'boolean' } }, additionalProperties: false } },
@@ -2688,14 +2963,31 @@ function mcpCallTool(name, args) {
       const body = composeAdrBody(args);
       if (!body) throw new Error('provide `body`, or at least one of context/decision/consequences');
       const near = (args.supersedes || args.confirmNew) ? null : nearMatchDecision(String(args.title));
-      const res = upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status, args.supersedes);
+      const res = upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status, args.supersedes, { code: args.code, aliases: args.aliases });
       return 'DECISIONS.md: ' + res + (near && res !== 'superseded'
         ? ' — NOTE: resembles accepted decision "' + near + '"; pass supersedes to replace it, or confirm it is distinct (possible re-litigation).'
         : '');
     }
     case 'write_lesson':
       if (!args.title || !args.body) throw new Error('title and body are required');
-      return 'LESSONS.md: ' + upsertEntry(LESSONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence);
+      return 'LESSONS.md: ' + upsertEntry(LESSONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence, undefined, undefined, { code: args.code, aliases: args.aliases });
+    case 'resolve_lesson': {
+      if (!args.title) throw new Error('title is required');
+      const st = args.status === 'obsolete' ? 'obsolete' : 'resolved';
+      const r = updateEntryMeta(LESSONS_FILE, String(args.title), { status: st, note: args.note });
+      if (r.ambiguous) return 'LESSONS.md: "' + args.title + '" matches ' + r.ambiguous.length + ' active lessons; narrow the title: ' + r.ambiguous.join('; ');
+      if (!r.matched) return 'LESSONS.md: no active lesson matched "' + args.title + '".';
+      return 'LESSONS.md: marked "' + r.title + '" ' + st + ' (kept; excluded from default search).';
+    }
+    case 'reconfirm': {
+      if (!args.title) throw new Error('title is required');
+      const file = args.file === 'lessons' ? LESSONS_FILE : DECISIONS_FILE;
+      const label = args.file === 'lessons' ? 'LESSONS.md' : 'DECISIONS.md';
+      const r = updateEntryMeta(file, String(args.title), { confidence: args.confidence });
+      if (r.ambiguous) return label + ': "' + args.title + '" matches ' + r.ambiguous.length + ' active entries; narrow the title: ' + r.ambiguous.join('; ');
+      if (!r.matched) return label + ': no active entry matched "' + args.title + '".';
+      return label + ': reconfirmed "' + r.title + '" as of ' + todayDate() + (args.confidence ? ' (confidence ' + args.confidence + ')' : '') + '.';
+    }
     case 'search_memory': {
       if (!args.query) throw new Error('query is required');
       const results = bm25Search(String(args.query), collectChunks({ includeHistory: !!args.history }), args.limit > 0 ? args.limit : SEARCH_LIMIT_DEFAULT);
@@ -2705,7 +2997,7 @@ function mcpCallTool(name, args) {
     }
     case 'list_decisions': {
       const entries = parseEntries(readFileSafe(DECISIONS_FILE) || '').entries
-        .filter((e) => args.all || !(entryStatus(e) === 'superseded' || entryStatus(e) === 'deprecated' || entryExpired(e)));
+        .filter((e) => args.all || !(isRetiredStatus(entryStatus(e)) || entryExpired(e)));
       if (!entries.length) return 'No current decisions.';
       return entries.map((e) => {
         const st = entryStatus(e);
@@ -2786,7 +3078,7 @@ function cmdMcp() {
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
-  const usage = 'usage: node coderecall.js <init|sync [--all]|status|check [--strict]|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|decision "<title>" [--context/--decision/--consequences/--status/--confidence]|mcp|score [--json]|selftest|version>';
+  const usage = 'usage: node coderecall.js <init|sync [--all]|status|check [--strict]|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|decision "<title>" [--context/--decision/--consequences/--status/--confidence/--code]|resolve-lesson "<title>" [--status resolved|obsolete] [--note ..]|reconfirm "<title>" [--file decisions|lessons] [--confidence ..]|mcp|score [--json]|selftest|version>';
   switch (cmd) {
     case 'init': return cmdInit();
     case 'sync': return cmdSync(args.includes('--all'));
@@ -2804,6 +3096,8 @@ function main() {
     case 'graduate': return cmdGraduate(args.includes('--global'));
     case 'decision': return cmdDecision(args);
     case 'decisions': return cmdDecisions(args.includes('--all'));
+    case 'resolve-lesson': return cmdResolveLesson(args);
+    case 'reconfirm': return cmdReconfirm(args);
     case 'mcp': return cmdMcp();
     case 'score': return cmdScore(args.includes('--json'));
     case 'selftest': return cmdSelftest();
@@ -2852,5 +3146,6 @@ if (require.main === module) {
     parseEntries, titleOverlap, tokenEstimate, sha12, writeSnapshot, touchTaskUpdated, nowIso,
     writeFileAtomic, acquireLock, releaseLock, withLock,
     appendSession, buildStaleReminder, collectChunks, bm25Search, runConsolidateAutoSafe,
+    updateEntryMeta, isRetiredStatus, entryFreshness,
   };
 }
