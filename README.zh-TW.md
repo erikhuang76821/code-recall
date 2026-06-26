@@ -134,6 +134,17 @@ git clone https://github.com/erikhuang76821/code-recall && cd code-recall && npm
 
 > 尚未上 npm——請用上面的 clone 安裝。Tagged release 在 [Releases](https://github.com/erikhuang76821/code-recall/releases) 頁;`coderecall` 還不是已發佈的 npm 套件。
 
+> **不想全域安裝?** `npm link` 是選配的。CLI 把 ledger 綁在**你執行時所在的目錄**(`process.cwd()`),**不是**綁在 clone 所在處——所以**一份 clone 服務所有專案**。只要 clone 一份(例如放在專案旁邊),然後在任意專案裡跑 `node /path/to/code-recall/coderecall.js <command>`,或設一次 shell alias:
+> ```sh
+> # bash/zsh (~/.bashrc) — 用「絕對路徑」才能在任何專案(不只同級)生效:
+> alias coderecall='node /abs/path/code-recall/coderecall.js'
+> ```
+> ```powershell
+> # PowerShell ($PROFILE):
+> function coderecall { node C:\abs\path\code-recall\coderecall.js @args }
+> ```
+> 之後 `coderecall init` 在每個專案都有效,且各自擁有獨立的 `.ai/memory/`——工具資料夾永不被污染。(Claude Code 的*自動注入 hook* 是另一回事:用 `install.ps1`/`install.sh` 註冊一次即可;在沒有 `.ai/memory/` 的專案會自動 no-op。)
+
 ### 1. 在專案底下初始化記憶（每個專案一次）
 
 ```sh
