@@ -8,7 +8,7 @@
 2. **Invisible operation**: zero manual invocation. Hooks capture and inject deterministically; the user never types a command after install.
 3. **Cross-tool**: one memory store readable by Claude Code, Cursor, Windsurf, Codex CLI, GitHub Copilot, Gemini CLI, Cline, Roo Code.
 4. **One-command deploy**: `node coderecall.js init` in any project. Windows-first (no symlinks, no bash-isms in hooks).
-5. **Token discipline**: injection digest ≤ ~200 tokens; each ledger file ≤ 1k tokens; dedupe-on-write; bounded growth.
+5. **Token discipline**: injection digest fence content hard-capped at `DIGEST_CHAR_BUDGET` (~1.2 KB chars, a few hundred tokens; +full TASK body in compact mode); each ledger file ≤ ~1k tokens; dedupe-on-write; bounded growth.
 
 ## Non-goals
 - No vector search / embeddings / semantic recall (lexical + structured files win on reliability and install cost).
@@ -107,7 +107,7 @@ Output:
 ```json
 {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"<digest>"},"suppressOutput":true}
 ```
-Digest (≤ ~200 tokens):
+Digest (fence content hard-capped at ~1.2 KB chars / a few hundred tokens):
 ```
 [coderecall] Persistent task ledger exists at .ai/memory/.
 GOAL: ...

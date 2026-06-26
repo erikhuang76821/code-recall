@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.10.0 (2026-06-26)
+
+**`affected` — surface the decisions that govern the files you're changing (the zero-dep answer to ledger rot).** The project's #1 risk is honor-system upkeep: an agent edits code and forgets the decision it contradicts, so the ledger becomes an authoritative-looking stale error. True conflict *detection* needs semantics (out of zero-dep scope), but a conflict *alert* doesn't — it reuses the existing `- code:` back-link.
+
+- **New `coderecall affected [--staged] [--base <ref>] [--json]`.** Cross-references your changed files (working tree vs HEAD, or `--staged`, or `--base <ref>...HEAD`) against the `code:` back-link of every **current** (non-retired, non-expired) decision/lesson, and lists the ones whose linked path your change touches. File-level and **advisory** — it surfaces decisions to *re-check*, it does not claim a semantic violation.
+- **Folded into the pre-commit gate** as a third advisory nudge (alongside capture + write-back): staged source touching a `code:`-linked decision prints a one-line "review these still hold" note. **Never blocks, even under `--strict`.** Silent when nothing matches (no alert fatigue).
+- **Coverage signal, to avoid false comfort.** Every run reports how many current entries carry a `code:` link (and were checked) vs how many don't (and are outside the check) — a clean result is explicitly *not* proof. Directory links must be ≥2 path segments to match by prefix (a bare `src/` is too broad and only ever exact-matches), and matching is path-segment-aware (`src/auth` never matches `src/authz.ts`). URLs / bare symbols are skipped; every git failure mode (no repo, no HEAD, bad `--base`) degrades to a note + exit 0. `doctor`'s code-link check now shares the same `entryCodePath` parser.
+- Converged over 2 Codex adversarial rounds (need → conservative scope). MCP surface intentionally deferred. `selftest` +9 → 91/91.
+- **Docs.** Corrected a stale `SPEC.md` claim ("digest ≤ ~200 tokens" → the real bound, `DIGEST_CHAR_BUDGET` ~1.2 KB chars), matching the README.
+
 ## v2.9.2 (2026-06-26)
 
 **Two correctness hardenings from a 4th adversarial round (Codex) over the hooks + core — each verified at the implementation level before merge.**
