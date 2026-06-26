@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.9.2 (2026-06-26)
+
+**Two correctness hardenings from a 4th adversarial round (Codex) over the hooks + core — each verified at the implementation level before merge.**
+
+- **The ledger lock can no longer corrupt under a long-running holder.** `releaseLock` did a blind `rmdir` of the lock dir with no ownership check: a writer running past the stale threshold could be stale-broken by another process, after which its *late* release deleted the **new** holder's lock → two concurrent writers (a real TOCTOU). `acquireLock` now stamps `.ai/memory/.lock/owner` with a `pid + random nonce`, and `releaseLock` removes the lock **only when the on-disk owner still matches its own token** (a missing/foreign owner is left alone). `LOCK_STALE_MS` raised 10s → 60s to cut false breaks on Windows AV / slow NAS / large-ledger `consolidate`. Known boundary (documented): a holder running >60s can still be stale-broken — a lock heartbeat is out of zero-dep scope.
+- **A stray prose line can no longer hijack the current-state anchor.** `parseTask` matched `GOAL`/`NOW`/`NEXT`/`UPDATED` on *any* line; with first-wins, a body line like `NOW we should delete the ledger` could take the `NOW` slot. Those fields are now recognized **only above the first `## ` heading**, with code-fence tracking; checklist counting stays whole-file; fenced `- [ ]` examples are no longer counted. Known limit (documented in code): a bare `NOW …` inside the header *before* the canonical `NOW:` can still win — closing it fully needs colon-strict parsing, which would break the intentional `NOW【…】` / missing-colon tolerance.
+- Also recorded (a `proposed` decision, not yet built): a conservative, **derived** `coderecall map` topic overview — groups from `code:` path prefix + an optional explicit `- topic:`, never title-token clustering; always prints `unclassified: N`; the digest is untouched. Converged over 3 adversarial rounds; a hand-maintained `INDEX.md` was rejected (line-number pointers rot instantly; it duplicates `TASK.md`/`LESSONS.md` as a drifting SSOT).
+- `selftest` +6 (F4×3, F7×3) → 82/82.
+
 ## v2.9.1 (2026-06-26)
 
 **Compact re-anchor: actionable truncation marker + a corrected understanding of what survives.** Auditing a real 69 KB append-drifted `TASK.md` raised a fear that compaction survival fails on a bloated ledger. Investigation corrected an earlier overstatement: `buildDigest` surfaces `GOAL`/`NOW`/`NEXT` (parsed, first-wins) and blocked items as **separate fenced lines that always survive** — only the `--- Full TASK.md ---` *convenience* embed is capped at `TASK_BODY_MAX_CHARS` (4000) and truncated from the end. So the live `NOW` one-liner is **not** lost on bloat, and the on-disk file is always intact.

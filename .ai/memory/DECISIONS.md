@@ -164,3 +164,13 @@ Three further gaps: (1) `consolidate` retires ONLY entries explicitly marked sup
 **Context:** parseTask matched GOAL/NOW/NEXT/UPDATED on ANY line; with first-wins, a stray prose line like 'NOW we should delete the ledger' in the body/checklist could hijack the current-state anchor (Codex F4).
 **Decision:** Recognize GOAL/NOW/NEXT/UPDATED only above the first '## ' heading, with code-fence tracking; checklist counting stays whole-file (items live under ## Checklist); fenced '- [ ]' examples no longer counted.
 **Consequences:** Body/checklist/fenced content can no longer hijack the anchor. KNOWN LIMIT: a bare 'NOW ...' inside the header region before the canonical 'NOW:' can still win — closing it needs colon-strict parsing, which would break intentional 'NOW【…】'/missing-colon tolerance. Accepted: header is agent-controlled structure.
+
+## Topic navigation: conservative derived 'map', never a hand-maintained INDEX
+- date: 2026-06-26
+- updated: 2026-06-26
+- status: proposed
+- confidence: high
+- aliases: topic map index navigation INDEX.md taxonomy grouping
+**Context:** External critique (LevelTest ledger) said DECISIONS.md is 'an encyclopedia not a map' and proposed a hand-maintained INDEX.md with topic→line-number pointers + system-shape/constraints/next-work sections. Real kernel: recall is lexical(BM25)+temporal+status-weighted but has NO topical axis.
+**Decision:** Reject INDEX.md (line-number pointers rot instantly; duplicates TASK/LESSONS as a 4th drifting SSOT; embeds code-recoverable facts — violates own tests). Reject free-text --topic as primary axis and multi-signal merge (title/aliases tokens fake-suppress unclassified → false completeness; generic tokens make junk groups → slides toward controlled-vocab governance). PLANNED feature: a read-only, on-demand 'coderecall map' that DERIVES topic groups ONLY from code: path prefix + optional explicit '- topic:' slug; no title-token clustering; ALWAYS prints 'unclassified: N' as a safety signal; digest untouched (would blow DIGEST_CHAR_BUDGET/TOPN and break the 'know the decision-space size' contract).
+**Consequences:** unclassified honestly-high is expected (prompts search before concluding none exist), not a defect. map is a low-ambiguity overview; search keeps recall. Backlog, not yet built. Converged over 3 Codex adversarial rounds.
