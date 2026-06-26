@@ -245,6 +245,19 @@ ADR tools have a status lifecycle but are human-authored and never surface to th
 
 ## 🛠️ Advanced Usage
 
+### 🧭 How to browse your decisions (which tool answers which question)
+
+The ledger is **not** meant to be read whole — that re-bills the whole (ever-growing) file into context every turn. Four surfaces each answer a different question, so you pull only what the task needs:
+
+| Question | Use | What you get |
+|---|---|---|
+| *What's the current state — where do I stand right now?* | the **injected digest** (automatic on session start / after compaction) | `GOAL`/`NOW`/`NEXT`, blocked items, and a resident index of **current** decision + lesson **titles** with totals |
+| *What decisions are in force?* | `coderecall decisions` (`--all` for superseded too) | the full HEAD list of accepted decision titles |
+| *Anything about topic X, and why?* | `coderecall search <topic>` | the matching entries' **bodies**, current-truth-first, ranked by relevance × status × recency |
+| *I don't know the exact word it's filed under* | add `- aliases:` to the entry (synonyms / old names) | lexical search now finds it by words not in its title/body |
+
+Rule of thumb: the digest is the **map** (what exists), `search` loads the **territory** (the why) on demand. You almost never need to open `DECISIONS.md`/`LESSONS.md` by hand. (There is no topic-browse command: a topical axis was evaluated and intentionally deferred — `search` + `aliases` cover topic recall today; see the project's own `DECISIONS.md` for the rationale.)
+
 ### 🔎 Search memory
 
 ```sh
