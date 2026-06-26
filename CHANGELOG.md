@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.9.1 (2026-06-26)
+
+**Compact re-anchor: actionable truncation marker + a corrected understanding of what survives.** Auditing a real 69 KB append-drifted `TASK.md` raised a fear that compaction survival fails on a bloated ledger. Investigation corrected an earlier overstatement: `buildDigest` surfaces `GOAL`/`NOW`/`NEXT` (parsed, first-wins) and blocked items as **separate fenced lines that always survive** — only the `--- Full TASK.md ---` *convenience* embed is capped at `TASK_BODY_MAX_CHARS` (4000) and truncated from the end. So the live `NOW` one-liner is **not** lost on bloat, and the on-disk file is always intact.
+
+- The truncation marker is now **actionable**: instead of `[…truncated to budget]` it reads "*open `.ai/memory/TASK.md` on disk for the full, current state*", so a re-anchoring agent reads the intact file rather than trusting a partial embed.
+- The real fix for a bloated `TASK.md` is write hygiene (keep it lean), not a bigger cap — recorded as a decision in the project's own ledger (dogfooding the new `code:` back-link + `aliases:` search terms). Non-blocking backlog: optionally hoist the checklist tail ahead of free-form notes before truncating.
+- `selftest` +2 (marker points to disk; live `NOW` survives a bloated body) → 76/76.
+
 ## v2.9.0 (2026-06-26)
 
 **Relevance-decay machine fields + lesson lifecycle, plus a resident decision index that ends silent fragmentation.** Motivated by auditing a real non-author project (a 72 KB `DECISIONS.md` / 69 KB append-drifted `TASK.md`): the decay model was sound but had no explicit fields to act on, and the digest surfaced only the top-5 decision titles — so an agent silently never knew the other 25 existed. The relevance-decay fixes were hardened by an adversarial Codex review (one real supersede bug + four guards).
