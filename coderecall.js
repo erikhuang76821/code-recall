@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.8.0.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.9.0.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -51,10 +51,10 @@ const STALE_REMINDER_MINUTES = 45;     // UserPromptSubmit reminder fires after 
 const CODEX_AGENTS_WARN_BYTES = 32768; // Codex CLI reads ~32KiB of AGENTS.md; warn beyond
 const GRADUATE_AGE_DAYS = 90;          // entries older than this + high confidence may graduate
 const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the digest (opt-in)
-const DIGEST_DECISIONS_TOPN = 5;       // current decisions surfaced in the digest (newest)
+const DIGEST_DECISIONS_TOPN = 12;      // newest current-decision TITLES listed in the resident HEAD index; header always carries the TOTAL count, overflow names the rest + how to pull them (anti-fragmentation). Bodies stay pull-on-demand; fence hard-cap is the final bound.
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.8.0';
+const VERSION = '2.9.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -675,17 +675,28 @@ function topGlobalLessons(n) {
 }
 
 /** Titles of the current (non-superseded/deprecated/expired) decisions, newest first, capped at n. */
+// Returns { titles, total }: the newest `n` CURRENT decision titles AND the total
+// current count. The digest renders these as a resident HEAD index so the agent always
+// sees how many decisions exist (it can never silently miss one → no re-litigation of
+// an unseen decision); bodies stay pull-on-demand via `search`/`decisions`.
 function currentDecisions(n) {
   const text = readFileSafe(DECISIONS_FILE);
-  if (text === null) return [];
-  const active = parseEntries(text).entries.filter((e) => {
+  if (text === null) return { titles: [], total: 0 };
+  const active = parseEntries(text).entries.map((e, i) => ({ e, i })).filter(({ e }) => {
     const st = entryStatus(e);
     // Surface CURRENT TRUTH only: accepted/active. `proposed` is still under
-    // consideration (not yet decided); superseded/deprecated/expired are history.
-    return st !== 'superseded' && st !== 'deprecated' && st !== 'proposed' && !entryExpired(e);
+    // consideration (not yet decided); retired (superseded/deprecated/resolved/
+    // obsolete) + expired are history.
+    return !isRetiredStatus(st) && st !== 'proposed' && !entryExpired(e);
   });
-  active.sort((a, b) => (entryDate(b) || '').localeCompare(entryDate(a) || ''));
-  return active.slice(0, n).map((e) => e.title);
+  // Newest first by date; tie-break by append order (entries are appended, so a
+  // higher index = written later = newer) — keeps "newest" honest when many entries
+  // share a date (common: several decisions in one day would otherwise list oldest-first).
+  active.sort((a, b) => {
+    const c = (entryDate(b.e) || '').localeCompare(entryDate(a.e) || '');
+    return c !== 0 ? c : b.i - a.i;
+  });
+  return { titles: active.slice(0, n).map(({ e }) => e.title), total: active.length };
 }
 
 /**
@@ -751,14 +762,23 @@ function buildDigest(opts) {
       ledgerParts.push(neutralizeLedger(sanitize('Blocked: ' + b.trim())));
     }
   }
-  // Surfacing (P-surfacing): inject the top current decisions so the agent SEES
-  // them every session / after compaction — "keep effective decisions influential".
-  // Bounded (newest N accepted, titles only); none on a fresh ledger.
-  const decns = currentDecisions(DIGEST_DECISIONS_TOPN);
-  if (decns.length) {
+  // Surfacing (P-surfacing) → resident HEAD index: list current decision TITLES
+  // newest-first so the agent sees the whole decision space every session / after
+  // compaction — not just a top few (which silently hides the rest → fragmentation:
+  // the agent re-decides or contradicts a decision it never knew existed). Titles only;
+  // bodies stay pull-on-demand. The header ALWAYS carries the total count and, when the
+  // list is capped, an overflow line names how many are unshown + how to reach them — so
+  // the map is never SILENTLY partial. Bounded by DIGEST_DECISIONS_TOPN + the fence cap.
+  const { titles: decns, total: decTotal } = currentDecisions(DIGEST_DECISIONS_TOPN);
+  if (decTotal) {
+    const capped = decns.length < decTotal;
     ledgerParts.push('');
-    ledgerParts.push('Current decisions (' + decns.length + ', newest first — read before proposing changes):');
+    ledgerParts.push(capped
+      ? 'Current decisions — ' + decns.length + ' of ' + decTotal +
+        ' shown (newest first, titles only; run `decisions` for all, `search <topic>` for bodies):'
+      : 'Current decisions (' + decTotal + ', newest first — read before proposing changes):');
     for (const d of decns) ledgerParts.push(neutralizeLedger(sanitize('- ' + d)));
+    if (capped) ledgerParts.push('- … +' + (decTotal - decns.length) + ' more current decision(s) not shown — `decisions` lists every title.');
   }
   // Optional cross-project lessons (opt-in: CODE_RECALL_GLOBAL_LESSONS=1). Off by
   // default so non-opted projects pay nothing.
@@ -2510,6 +2530,28 @@ function cmdSelftest() {
     run(['decision', 'Maybe evaluate GraphQL', '--decision', 'spike only', '--status', 'proposed']);
     const dig3 = run(['digest']);
     check('digest excludes proposed decisions from surfacing', !/Maybe evaluate GraphQL/.test(dig3));
+    // Resident HEAD index: when current decisions exceed DIGEST_DECISIONS_TOPN, the
+    // digest header carries the TOTAL count and an overflow line names the rest +
+    // how to pull them — the map is never SILENTLY partial (anti-fragmentation).
+    {
+      const idxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-decidx-'));
+      try {
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: idxDir, stdio: 'ignore' });
+        const irun = (a) => cp.execFileSync(process.execPath, [__filename].concat(a), { cwd: idxDir, encoding: 'utf8' });
+        const N = 15; // > DIGEST_DECISIONS_TOPN (12)
+        for (let i = 1; i <= N; i++) irun(['decision', 'Indexed decision number ' + i, '--decision', 'd' + i]);
+        const idig = irun(['digest']);
+        check('digest decision index header shows "shown of total"', new RegExp('Current decisions — 12 of ' + N + ' shown').test(idig));
+        check('digest decision index emits an overflow pointer to `decisions`', /\+3 more current decision\(s\) not shown — `decisions` lists every title/.test(idig));
+        check('digest decision index lists the newest title', /Indexed decision number 15/.test(idig));
+        // Below the cap → plain header with the full count, no overflow line.
+        const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-decidx2-'));
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: sdir, stdio: 'ignore' });
+        cp.execFileSync(process.execPath, [__filename, 'decision', 'Only decision', '--decision', 'd'], { cwd: sdir, stdio: 'ignore' });
+        const sdig = cp.execFileSync(process.execPath, [__filename, 'digest'], { cwd: sdir, encoding: 'utf8' });
+        check('digest decision index: under cap uses the plain full-count header', /Current decisions \(1, newest first/.test(sdig) && !/of 1 shown/.test(sdig));
+      } finally { try { fs.rmSync(idxDir, { recursive: true, force: true }); } catch (e) {} }
+    }
     // LESSONS lifecycle: resolved/obsolete lessons retire from default search but
     // stay reachable via --history (mark-over-delete), mirroring decisions.
     {

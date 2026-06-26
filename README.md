@@ -10,7 +10,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml/badge.svg)](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-2.8-orange.svg)](ROADMAP.md)
+[![Version](https://img.shields.io/badge/version-2.9-orange.svg)](ROADMAP.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 Code Recall is a tiny **local decision ledger** for AI coding agents. It holds the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — in plain Markdown, and a SessionStart/PreCompact hook **re-injects it in front of the agent the moment context is lost** (session start, resume, before compaction). Not a memory database; not the cloud; not a governance platform. Zero dependencies, stays in the repo, the same setup across **Claude Code / Cursor / Gemini CLI**. Think **"Git for decisions" that survives compaction.**
@@ -296,7 +296,7 @@ The most dangerous thing about long-term memory isn't *forgetting* — it's *wro
 - **Current/history split:** `search` and MCP `search_memory` **return current decisions only by default**; superseded/deprecated/archive don't appear. Add `--history` to include them (clearly labeled `[superseded]`). `decisions` gives the HEAD view.
 - **Explicit supersede:** `decision "new" --supersedes "old keyword"` retires the old decision directly — independent of title similarity.
 - **Weighted ranking:** recall score = `BM25 × statusWeight (accepted/active 1.0 / proposed 0.5 / deprecated 0.2 / resolved 0.1 / superseded·obsolete 0.05) × confidence × recency`. On an equal match, current/high-confidence/recent decisions rank first.
-- **Surfacing:** every session / after compaction, the digest **surfaces the top-5 current decisions** (titles only, newest-first, **accepted only** — proposed/superseded/expired excluded). Bounded curated attention, not the whole log.
+- **Surfacing (resident HEAD index):** every session / after compaction, the digest lists the **current decision titles** newest-first (accepted only — proposed/retired/expired excluded), and the header **always carries the total count** plus how to reach the rest (`decisions` for all titles, `search` for bodies). So the agent sees the *whole* decision space — it can never silently miss a decision it might re-litigate — while bodies stay pull-on-demand. Bounded by a title cap + the fence budget (the map is the resident layer; the territory loads on demand).
 - **Anti-re-litigation:** recording a decision that clearly overlaps an accepted one but is below the auto-supersede bar offers three resolutions: `--supersedes "X"`, `--confirm-new`, or revise the title.
 
 > Design philosophy: what an LLM lacks isn't *storage*, it's **attention** — the question isn't how many you can store, but "which few should this task see."

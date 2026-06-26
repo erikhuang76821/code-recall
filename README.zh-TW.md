@@ -10,7 +10,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml/badge.svg)](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-2.8-orange.svg)](ROADMAP.md)
+[![Version](https://img.shields.io/badge/version-2.9-orange.svg)](ROADMAP.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 Code Recall 是給 AI coding agent 的一個極輕量**本地決策 ledger**。它保存專案最容易弄丟、也最難重建的東西——**為什麼當初這樣做、哪些路已被證明走不通**——用純 Markdown 存,並由 SessionStart/PreCompact hook 在 **context 消失的那一刻把它重新注入到 agent 面前**(session 啟動、resume、壓縮前)。不是記憶資料庫,不上雲,不是治理平台。零依賴、留在 repo 裡,Claude Code / Cursor / Gemini CLI 同一套設定。就是「**撐過 compaction 的決策版 Git**」。
@@ -295,7 +295,7 @@ DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈：寫入
 - **現行/歷史分離**：`search` 與 MCP `search_memory` **預設只回現行決策**；superseded/deprecated/archive 不出現。要看歷史才加 `--history`（明確標 `[superseded]`）。`decisions` 給你 HEAD 視圖。
 - **顯式取代**：`decision "新決定" --supersedes "舊關鍵字"` 直接讓舊決策失去影響力——不靠標題相似度。
 - **加權排序**：召回分數 = `BM25 × 狀態權重(accepted/active 1.0 / proposed 0.5 / deprecated 0.2 / resolved 0.1 / superseded·obsolete 0.05) × confidence × recency`。同樣命中時，**現行、高信心、近期**的決策一定排前面。
-- **主動浮現**：每次 session / compaction 後，digest **自動帶出 top-5 現行決策**（僅標題、newest-first、**只 accepted**）。Bounded、不污染。
+- **主動浮現（常駐 HEAD 索引）**：每次 session / compaction 後，digest 列出**現行決策標題**（newest-first、只 accepted，proposed/退役/過期排除），且表頭**永遠帶總數**＋取得其餘的路徑（`decisions` 列全部標題、`search` 拉內文）。agent 因此看得到*整個*決策空間——不會靜默漏掉一條而重決——內文則維持按需載入。受標題上限＋fence 預算雙重封頂（地圖常駐、疆域按需）。
 - **防再 litigate**：記新決策時若與某條 accepted 決策明顯重疊但未到自動取代門檻，提示三條解法：`--supersedes "X"`、`--confirm-new`、或改寫標題。
 
 > 設計哲學：LLM 缺的不是 storage，是 **attention**——問題不是能存幾條，而是「這個任務該被看到的是哪幾條」。
