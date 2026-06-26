@@ -143,3 +143,24 @@ Three further gaps: (1) `consolidate` retires ONLY entries explicitly marked sup
 **Context:** Auditing LevelTest (69KB append-drifted TASK.md) raised a fear that compaction-survival fails on a bloated TASK.md. Investigation corrected an earlier overstatement.
 **Decision:** buildDigest surfaces GOAL/NOW/NEXT (parsed, first-wins) and blocked items as SEPARATE fenced lines that always survive; only the '--- Full TASK.md ---' convenience embed is capped at TASK_BODY_MAX_CHARS=4000 (truncated from the end). So the live NOW one-liner is NOT lost on bloat (my earlier claim was wrong); the on-disk file is always intact. Made the truncation marker actionable: it now tells a re-anchoring agent to open .ai/memory/TASK.md on disk.
 **Consequences:** The real fix for a bloated TASK.md is write hygiene (keep it lean), not a bigger cap. Backlog (non-blocking): optionally hoist the checklist's open/blocked tail ahead of free-form notes before truncating, so the most useful body content survives the cap.
+
+## Ledger lock uses owner-token, not blind rmdir
+- date: 2026-06-26
+- updated: 2026-06-26
+- status: accepted
+- confidence: high
+- code: coderecall.js → acquireLock/releaseLock
+**Context:** releaseLock did a blind rmdir of the lock dir with no ownership check; a holder running >LOCK_STALE_MS could be stale-broken by another process, then its late release deleted the NEW holder's lock → two concurrent writers → ledger corruption (Codex F7, real TOCTOU).
+**Decision:** acquireLock stamps .lock/owner with pid+random nonce; releaseLock removes the lock ONLY when on-disk owner still equals its own token (missing/foreign owner → leave it). Raised LOCK_STALE_MS 10s→60s to cut false breaks on Windows AV/slow NAS/large-ledger consolidate.
+**Consequences:** No cross-delete corruption (Codex verified all interleavings safe). Cost: a long holder (>60s) can still be stale-broken (no heartbeat — out of zero-dep scope); a failed owner-write self-heals via stale-break after 60s rather than instant release.
+
+## TASK fields parsed in header region only
+- date: 2026-06-26
+- updated: 2026-06-26
+- status: accepted
+- confidence: high
+- code: coderecall.js → parseTask
+- aliases: header scoping anchor hijack first-wins
+**Context:** parseTask matched GOAL/NOW/NEXT/UPDATED on ANY line; with first-wins, a stray prose line like 'NOW we should delete the ledger' in the body/checklist could hijack the current-state anchor (Codex F4).
+**Decision:** Recognize GOAL/NOW/NEXT/UPDATED only above the first '## ' heading, with code-fence tracking; checklist counting stays whole-file (items live under ## Checklist); fenced '- [ ]' examples no longer counted.
+**Consequences:** Body/checklist/fenced content can no longer hijack the anchor. KNOWN LIMIT: a bare 'NOW ...' inside the header region before the canonical 'NOW:' can still win — closing it needs colon-strict parsing, which would break intentional 'NOW【…】'/missing-colon tolerance. Accepted: header is agent-controlled structure.
