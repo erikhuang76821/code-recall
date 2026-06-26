@@ -12,6 +12,7 @@ Entry format (strict):
   - updated: YYYY-MM-DD     # last confirmed still true (starts == date; refresh via `reconfirm`)
   - confidence: high|med|low
   - code: src/foo.ts → bar  # OPTIONAL back-link to the file (and symbol) the pitfall lives in
+  - aliases: k8s helm        # OPTIONAL extra search terms (synonyms / old names) so lexical search finds this by words not in the title/body
   <what failed AND the root cause, 1-3 lines>
 
 Lifecycle (mark, don't delete): when the root cause is fixed mark `- status: resolved`;

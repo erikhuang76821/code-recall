@@ -52,6 +52,7 @@ const CODEX_AGENTS_WARN_BYTES = 32768; // Codex CLI reads ~32KiB of AGENTS.md; w
 const GRADUATE_AGE_DAYS = 90;          // entries older than this + high confidence may graduate
 const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the digest (opt-in)
 const DIGEST_DECISIONS_TOPN = 12;      // newest current-decision TITLES listed in the resident HEAD index; header always carries the TOTAL count, overflow names the rest + how to pull them (anti-fragmentation). Bodies stay pull-on-demand; fence hard-cap is the final bound.
+const DIGEST_LESSONS_TOPN = 8;         // active-lesson TITLES surfaced alongside decisions (same anti-fragmentation rationale: the agent should SEE which pitfalls exist, not just their count). Listed after decisions so decisions win the shared fence budget.
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
 const VERSION = '2.9.0';
@@ -560,6 +561,12 @@ function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMa
     // the referenced path disappears. Single line; newlines collapsed.
     const codeRef = extra && extra.code ? String(extra.code).replace(/[\r\n]+/g, ' ').trim() : '';
     if (codeRef) freshLines.push('- code: ' + codeRef);
+    // Optional `aliases:` — free-text alternative search terms (synonyms, the old
+    // name of a thing, related jargon). The whole entry is the BM25 search text, so
+    // these terms make the entry findable by words that aren't in its title/body —
+    // a zero-dep mitigation for lexical search missing synonyms. Single line.
+    const aliases = extra && extra.aliases ? String(extra.aliases).replace(/[\r\n]+/g, ' ').trim() : '';
+    if (aliases) freshLines.push('- aliases: ' + aliases);
     // P2 — explicit supersede: when supersedeMatch is given, retire the active
     // entry whose TITLE CONTAINS it (case-insensitive), regardless of title
     // overlap (fixes the brittle >0.8-Jaccard auto-match for reworded titles).
@@ -674,7 +681,6 @@ function topGlobalLessons(n) {
   return entries.slice(-n).reverse().map((e) => e.title);
 }
 
-/** Titles of the current (non-superseded/deprecated/expired) decisions, newest first, capped at n. */
 // Returns { titles, total }: the newest `n` CURRENT decision titles AND the total
 // current count. The digest renders these as a resident HEAD index so the agent always
 // sees how many decisions exist (it can never silently miss one → no re-litigation of
@@ -692,6 +698,21 @@ function currentDecisions(n) {
   // Newest first by date; tie-break by append order (entries are appended, so a
   // higher index = written later = newer) — keeps "newest" honest when many entries
   // share a date (common: several decisions in one day would otherwise list oldest-first).
+  active.sort((a, b) => {
+    const c = (entryDate(b.e) || '').localeCompare(entryDate(a.e) || '');
+    return c !== 0 ? c : b.i - a.i;
+  });
+  return { titles: active.slice(0, n).map(({ e }) => e.title), total: active.length };
+}
+
+// Returns { titles, total } for ACTIVE lessons (not resolved/obsolete/expired),
+// newest first. Same anti-fragmentation rationale as currentDecisions: surface which
+// pitfalls exist so the agent doesn't repeat one it never saw; bodies stay on-demand.
+function currentLessons(n) {
+  const text = readFileSafe(LESSONS_FILE);
+  if (text === null) return { titles: [], total: 0 };
+  const active = parseEntries(text).entries.map((e, i) => ({ e, i }))
+    .filter(({ e }) => !isRetiredStatus(entryStatus(e)) && !entryExpired(e));
   active.sort((a, b) => {
     const c = (entryDate(b.e) || '').localeCompare(entryDate(a.e) || '');
     return c !== 0 ? c : b.i - a.i;
@@ -779,6 +800,19 @@ function buildDigest(opts) {
       : 'Current decisions (' + decTotal + ', newest first — read before proposing changes):');
     for (const d of decns) ledgerParts.push(neutralizeLedger(sanitize('- ' + d)));
     if (capped) ledgerParts.push('- … +' + (decTotal - decns.length) + ' more current decision(s) not shown — `decisions` lists every title.');
+  }
+  // Active lessons get the same resident title index (symmetry: the agent should SEE
+  // which pitfalls exist, not just a footer count, so it doesn't repeat one it never
+  // saw). Listed AFTER decisions so decisions win the shared fence budget when capped.
+  const { titles: lsns, total: lsnTotal } = currentLessons(DIGEST_LESSONS_TOPN);
+  if (lsnTotal) {
+    const lcapped = lsns.length < lsnTotal;
+    ledgerParts.push('');
+    ledgerParts.push(lcapped
+      ? 'Active lessons — ' + lsns.length + ' of ' + lsnTotal + ' shown (pitfalls; `search <topic>` for the why):'
+      : 'Active lessons (' + lsnTotal + ' — do not retry these):');
+    for (const l of lsns) ledgerParts.push(neutralizeLedger(sanitize('- ' + l)));
+    if (lcapped) ledgerParts.push('- … +' + (lsnTotal - lsns.length) + ' more — `search <topic>` to surface.');
   }
   // Optional cross-project lessons (opt-in: CODE_RECALL_GLOBAL_LESSONS=1). Off by
   // default so non-opted projects pay nothing.
@@ -2497,6 +2531,10 @@ function cmdSelftest() {
     run(['decision', 'Coded decision', '--decision', 'x', '--code', 'src/pay/charge.ts → chargeCard']);
     const codedText = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
     check('decision --code writes a code: back-link', /## Coded decision[\s\S]*?- code: src\/pay\/charge\.ts → chargeCard/.test(codedText));
+    // --aliases makes an entry findable by synonyms absent from its title/body
+    // (zero-dep mitigation for lexical search missing synonyms).
+    run(['decision', 'Container orchestration platform', '--decision', 'run it there', '--aliases', 'kubernetes k8s helm']);
+    check('search finds a decision by an alias term not in its title/body', /Container orchestration platform/.test(run(['search', 'k8s'])));
     // Regression: a long ADR field must NOT be truncated to 200 chars nor get a
     // " […]" marker on write (the secret-sanitizer's transcript cap once leaked
     // both into the canonical ledger). Authored content keeps secret redaction but
@@ -2560,6 +2598,10 @@ function cmdSelftest() {
         '## Retry storm on the flaky upload endpoint',
         '- date: 2026-01-01', '- updated: 2026-01-01', '- confidence: high',
         'Naive retries hammered the upload endpoint; root cause was no backoff.', ''].join('\n'), 'utf8');
+      // Resident lessons index: an active lesson's TITLE surfaces in the digest
+      // (not just the footer count), so the agent sees which pitfalls exist.
+      const ldig = run(['digest']);
+      check('digest surfaces active lesson titles (resident index)', /Active lessons/.test(ldig) && /Retry storm on the flaky upload/.test(ldig));
       const before = run(['search', 'upload']);
       check('active lesson appears in default search', /Retry storm on the flaky upload/.test(before));
       const rl = run(['resolve-lesson', 'flaky upload', '--status', 'resolved', '--note', 'fixed: added exponential backoff']);
@@ -2678,14 +2720,14 @@ function cmdDecision(args) {
     } else positional.push(a);
   }
   const title = positional.join(' ').trim();
-  const usage = 'usage: node coderecall.js decision "<title>" [--context .. --decision .. --consequences ..] [--supersedes "<old title/substr>"] [--confirm-new] [--status proposed|accepted|deprecated] [--confidence high|med|low] [--code "<path → symbol>"]  (or --body "..")';
+  const usage = 'usage: node coderecall.js decision "<title>" [--context .. --decision .. --consequences ..] [--supersedes "<old title/substr>"] [--confirm-new] [--status proposed|accepted|deprecated] [--confidence high|med|low] [--code "<path → symbol>"] [--aliases "<synonyms/old names>"]  (or --body "..")';
   if (!title) fail(usage);
   const body = composeAdrBody({ body: opts.body, context: opts.context, decision: opts.decision, consequences: opts.consequences });
   if (!body) fail('provide --body, or at least one of --context / --decision / --consequences\n' + usage);
   const status = /^(?:proposed|accepted|deprecated)$/.test(opts.status || '') ? opts.status : 'accepted';
   const confirmNew = !!(opts['confirm-new'] || opts.distinct);
   const near = (opts.supersedes || confirmNew) ? null : nearMatchDecision(title);
-  const res = upsertEntry(DECISIONS_FILE, title, splitLines(body), opts.confidence, status, opts.supersedes, { code: opts.code });
+  const res = upsertEntry(DECISIONS_FILE, title, splitLines(body), opts.confidence, status, opts.supersedes, { code: opts.code, aliases: opts.aliases });
   console.log('DECISIONS.md: ' + res + ' — "' + title + '" [' + status + ']' +
     (res === 'superseded' && opts.supersedes ? ' (superseded a prior decision matching "' + opts.supersedes + '")' : ''));
   if (near && res !== 'superseded') {
@@ -2874,9 +2916,9 @@ function mcpToolDefs() {
     { name: 'update_task', description: 'Update TASK.md GOAL/NOW/NEXT. Provide any subset.',
       inputSchema: { type: 'object', properties: { goal: { type: 'string' }, now: { type: 'string' }, next: { type: 'string' } }, additionalProperties: false } },
     { name: 'write_decision', description: 'Record an ADR-grade decision (DECISIONS.md): why + what + consequences. Provide either `body`, or structured `context`/`decision`/`consequences`. Use `supersedes` to explicitly retire a prior decision by title substring. `code` optionally back-links the file (and → symbol) this decision governs. ONLY record what reading the current code could NOT recover (the why, the rejected paths) — skip anything a competent engineer would reconstruct from the code itself.',
-      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, supersedes: { type: 'string' }, code: { type: 'string', description: 'back-link, e.g. "src/payments/charge.ts → chargeCard"' }, confirmNew: { type: 'boolean', description: 'acknowledge a flagged overlap as a distinct decision (suppresses the re-litigation note)' }, status: { type: 'string', enum: ['proposed', 'accepted', 'deprecated'] }, confidence: conf }, required: ['title'], additionalProperties: false } },
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, context: { type: 'string' }, decision: { type: 'string' }, consequences: { type: 'string' }, body: { type: 'string' }, supersedes: { type: 'string' }, code: { type: 'string', description: 'back-link, e.g. "src/payments/charge.ts → chargeCard"' }, aliases: { type: 'string', description: 'alternative search terms (synonyms / old names) so lexical search finds this by words not in the title/body' }, confirmNew: { type: 'boolean', description: 'acknowledge a flagged overlap as a distinct decision (suppresses the re-litigation note)' }, status: { type: 'string', enum: ['proposed', 'accepted', 'deprecated'] }, confidence: conf }, required: ['title'], additionalProperties: false } },
     { name: 'write_lesson', description: 'Record a lesson / failure + root cause (LESSONS.md): "do not retry X because Y". `code` optionally back-links the file (and → symbol) the pitfall lives in. Record only what the code cannot tell you — a pitfall, a confirmed-intentional surprise, an API quirk; skip anything recoverable by reading the code.',
-      inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, code: { type: 'string', description: 'back-link, e.g. "src/auth/session.ts → refresh"' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
+      inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, code: { type: 'string', description: 'back-link, e.g. "src/auth/session.ts → refresh"' }, aliases: { type: 'string', description: 'alternative search terms (synonyms / old names) so lexical search finds this by words not in the title/body' }, confidence: conf }, required: ['title', 'body'], additionalProperties: false } },
     { name: 'resolve_lesson', description: 'Mark a LESSONS entry no longer current: `resolved` (root cause fixed, the pitfall no longer bites) or `obsolete` (the situation it warned about is gone). Mark-over-delete: the entry is kept and still searchable via history, just retired from default results so it stops constraining new work. Matches the first active lesson whose title contains `title`.',
       inputSchema: { type: 'object', properties: { title: { type: 'string', description: 'title substring of the lesson to retire' }, status: { type: 'string', enum: ['resolved', 'obsolete'], description: 'default resolved' }, note: { type: 'string', description: 'optional one-line note on how/why it was resolved' } }, required: ['title'], additionalProperties: false } },
     { name: 'reconfirm', description: 'Re-stamp an entry as still-true today without rewriting it: refreshes `updated:` (so recency ranking and the staleness flag treat it as fresh) and can re-raise `confidence`. Use when you verified an older decision/lesson still holds. Matches the first active entry whose title contains `title`.',
@@ -2921,14 +2963,14 @@ function mcpCallTool(name, args) {
       const body = composeAdrBody(args);
       if (!body) throw new Error('provide `body`, or at least one of context/decision/consequences');
       const near = (args.supersedes || args.confirmNew) ? null : nearMatchDecision(String(args.title));
-      const res = upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status, args.supersedes, { code: args.code });
+      const res = upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status, args.supersedes, { code: args.code, aliases: args.aliases });
       return 'DECISIONS.md: ' + res + (near && res !== 'superseded'
         ? ' — NOTE: resembles accepted decision "' + near + '"; pass supersedes to replace it, or confirm it is distinct (possible re-litigation).'
         : '');
     }
     case 'write_lesson':
       if (!args.title || !args.body) throw new Error('title and body are required');
-      return 'LESSONS.md: ' + upsertEntry(LESSONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence, undefined, undefined, { code: args.code });
+      return 'LESSONS.md: ' + upsertEntry(LESSONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence, undefined, undefined, { code: args.code, aliases: args.aliases });
     case 'resolve_lesson': {
       if (!args.title) throw new Error('title is required');
       const st = args.status === 'obsolete' ? 'obsolete' : 'resolved';

@@ -141,7 +141,7 @@ node coderecall.js <command>      # 或發佈後：npx coderecall <command>
 | `status` | 顯示 GOAL/NOW/NEXT、checklist、檔案大小、漂移、新鮮度 |
 | `doctor [--selftest]` | 健診（hooks/帳本/路徑/lint/Codex 32KiB）；`--selftest` 加跑回歸測試 |
 | `score [--json]` | 評估工作狀態健康度（GOAL 清晰度 / NEXT 可執行性 / blockers 有無理由 / 新鮮度） |
-| `decision "<title>" [--context/--decision/--consequences/--status/--confidence] [--supersedes "<舊標題/關鍵字>"] [--code "<path → symbol>"]` | 一行記下一筆 ADR 決策；`--supersedes` 顯式取代既有決策（不靠標題相似度）；`--code` 回連它治理的檔案/符號（路徑消失時 `doctor` 會示警） |
+| `decision "<title>" [--context/--decision/--consequences/--status/--confidence] [--supersedes "<舊標題/關鍵字>"] [--code "<path → symbol>"]` | 一行記下一筆 ADR 決策；`--supersedes` 顯式取代既有決策（不靠標題相似度）；`--code` 回連它治理的檔案/符號（路徑消失時 `doctor` 會示警）；`--aliases "<同義詞/舊名>"` 加額外搜尋詞，讓詞法搜尋能用標題/內文以外的字找到它 |
 | `search <query> [--limit N] [--history]` | 詞法搜尋，**預設只回現行真相**（superseded/deprecated/resolved/obsolete/archive 排除）；`--history` 才含歷史（標 `[superseded]` / `[resolved]`） |
 | `decisions [--all]` | **HEAD 視圖**：列出目前 accepted 的決策（`--all` 含已取代/棄用） |
 | `resolve-lesson "<title>" [--status resolved\|obsolete] [--note ".."]` | 退役一筆教訓：根因已修（`resolved`）或前提已不存在（`obsolete`）——保留且可經 `--history` 查到，只退出預設結果（mark-over-delete） |
@@ -295,7 +295,7 @@ DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈：寫入
 - **現行/歷史分離**：`search` 與 MCP `search_memory` **預設只回現行決策**；superseded/deprecated/archive 不出現。要看歷史才加 `--history`（明確標 `[superseded]`）。`decisions` 給你 HEAD 視圖。
 - **顯式取代**：`decision "新決定" --supersedes "舊關鍵字"` 直接讓舊決策失去影響力——不靠標題相似度。
 - **加權排序**：召回分數 = `BM25 × 狀態權重(accepted/active 1.0 / proposed 0.5 / deprecated 0.2 / resolved 0.1 / superseded·obsolete 0.05) × confidence × recency`。同樣命中時，**現行、高信心、近期**的決策一定排前面。
-- **主動浮現（常駐 HEAD 索引）**：每次 session / compaction 後，digest 列出**現行決策標題**（newest-first、只 accepted，proposed/退役/過期排除），且表頭**永遠帶總數**＋取得其餘的路徑（`decisions` 列全部標題、`search` 拉內文）。agent 因此看得到*整個*決策空間——不會靜默漏掉一條而重決——內文則維持按需載入。受標題上限＋fence 預算雙重封頂（地圖常駐、疆域按需）。
+- **主動浮現（常駐索引·抗斷片）**：每次 session / compaction 後，digest 列出**現行決策標題與 active 教訓標題**（newest-first），每個表頭**永遠帶總數**＋取得其餘的路徑（`decisions` 列全部、`search` 拉內文）。agent 因此看得到*哪些*決策與坑存在——不會靜默漏掉一條而重決／重踩——內文維持按需載入（**地圖**常駐、**疆域**按需）。受各區標題上限＋fence 預算封頂。**誠實 scope**：常駐的是*存在性地圖*（標題＋總數＋存取路徑），**不是內文**；且檢索是詞法的，只靠同義詞才找得到的條目仍可能漏。在條目加 `- aliases: <同義詞／舊名>` 即可零依賴補上這個洞。
 - **防再 litigate**：記新決策時若與某條 accepted 決策明顯重疊但未到自動取代門檻，提示三條解法：`--supersedes "X"`、`--confirm-new`、或改寫標題。
 
 > 設計哲學：LLM 缺的不是 storage，是 **attention**——問題不是能存幾條，而是「這個任務該被看到的是哪幾條」。

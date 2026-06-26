@@ -13,6 +13,7 @@ Entry format (backward-compatible — date + confidence + free body still valid)
   - status: accepted        # proposed | accepted | superseded | deprecated
   - confidence: high|med|low
   - code: src/foo.ts → bar  # OPTIONAL back-link to the file (and symbol) this decision governs
+  - aliases: k8s helm        # OPTIONAL extra search terms (synonyms / old names) so lexical search finds this by words not in the title/body
   # optional lifecycle: supersedes / superseded-by / expires: YYYY-MM-DD / graduated
   **Context:** why this came up / the forces at play
   **Decision:** what we decided
