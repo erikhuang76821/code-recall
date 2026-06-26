@@ -2744,18 +2744,27 @@ function cmdSelftest() {
       acr(['decision', 'Broad src rule', '--decision', 'x', '--code', 'src/']);
       acr(['decision', 'Old webhook policy', '--decision', 'gone', '--code', 'src/pay/charge.js']);
       acr(['decision', 'Spec link', '--decision', 'z', '--code', 'https://ex.com/a.js']);
+      // Segment-aware negative: code: dir "pkg/aaa" must NOT match the sibling
+      // "pkg/aaaX.js" (only files under pkg/aaa/). Windows path: code: with
+      // backslashes must normalize and match a forward-slash changed file.
+      acr(['decision', 'Sibling guard', '--decision', 's', '--code', 'pkg/aaa']);
+      acr(['decision', 'Win path rule', '--decision', 'w', '--code', 'win\\dir\\file.js']);
       // Retire "Old webhook policy" the real way (explicit supersede flips it to
       // superseded); the replacement carries no code: so only the live links match.
       acr(['decision', 'Webhook policy v2', '--decision', 'replaces old', '--supersedes', 'Old webhook policy']);
       const mkstage = (rel, body) => { const fp = path.join(atmp, rel.replace(/\//g, path.sep)); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, body || 'x\n', 'utf8'); agit(['add', rel]); };
       mkstage('src/pay/charge.js', 'charge\n');
       mkstage('src/auth/session.js', 'sess\n');
+      mkstage('pkg/aaaX.js', 'sibling\n');   // sibling of code: pkg/aaa — must NOT match
+      mkstage('win/dir/file.js', 'win\n');   // matches code: win\dir\file.js after normalization
       const aff = acr(['affected', '--staged']);
       check('affected: file-linked decision surfaces on a matching staged file', /Charge idempotency/.test(aff));
       check('affected: ≥2-segment dir link matches a file under it', /Auth module shape/.test(aff));
       check('affected: retired (superseded) decision does NOT surface', !/Old webhook policy/.test(aff));
       check('affected: too-broad 1-segment dir link (src/) does NOT match', !/Broad src rule/.test(aff));
       check('affected: URL code: link is ignored', !/Spec link/.test(aff));
+      check('affected: segment-aware — sibling "pkg/aaaX.js" does NOT match dir "pkg/aaa"', !/Sibling guard/.test(aff));
+      check('affected: backslash code: path normalizes and matches a forward-slash file', /Win path rule/.test(aff));
       check('affected: prints a coverage line (no false comfort)', /Coverage: .*OUTSIDE this check/.test(aff));
       const affJson = JSON.parse(acr(['affected', '--staged', '--json']));
       check('affected --json reports matches + coverage', Array.isArray(affJson.matches) && affJson.matches.length >= 2 && typeof affJson.coverage.withoutCode === 'number');
