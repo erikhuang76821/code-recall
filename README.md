@@ -13,7 +13,7 @@
 [![Version](https://img.shields.io/badge/version-2.9-orange.svg)](ROADMAP.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-Code Recall is a tiny **local decision ledger** for AI coding agents. It holds the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — in plain Markdown, and a SessionStart/PreCompact hook **re-injects it in front of the agent the moment context is lost** (session start, resume, before compaction). Not a memory database; not the cloud; not a governance platform. Zero dependencies, stays in the repo, the same setup across **Claude Code / Cursor / Gemini CLI**. Think **"Git for decisions" that survives compaction.**
+Code Recall is a tiny **local decision ledger** for AI coding agents. It holds the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — in plain Markdown, and a SessionStart hook **re-injects it in front of the agent the moment context resets** (session start, resume, and after compaction) — with a PreCompact hook snapshotting the conversation tail just before compaction (Claude Code native hooks; instruction-driven on other tools — see below). Not a memory database; not the cloud; not a governance platform. Zero dependencies, stays in the repo, the same setup across **Claude Code / Cursor / Gemini CLI**. Think **"Git for decisions" that survives compaction.**
 
 **Requirements** · Node ≥ 10.12 (anything since 2018; CI runs Node 18 / 20 × Linux / Windows).
 
@@ -21,7 +21,7 @@ Code Recall is a tiny **local decision ledger** for AI coding agents. It holds t
 
 ## 🎬 See it — what the agent sees after a compaction
 
-A real ledger for *"add idempotency to the payments webhook."* Mid-task, the context window compacts. **Without** Code Recall the agent loses the thread — it re-proposes a design you already rejected, or re-adds the dedup key it just wrote. **With** it, the PreCompact hook re-injects this the instant the new context starts (`coderecall digest --compact`, real output, trimmed):
+A real ledger for *"add idempotency to the payments webhook."* Mid-task, the context window compacts. **Without** Code Recall the agent loses the thread — it re-proposes a design you already rejected, or re-adds the dedup key it just wrote. **With** it, the moment the new (post-compaction) context starts, Code Recall's SessionStart hook re-injects this (`coderecall digest --compact`, representative real output, trimmed):
 
 ```text
 Context was just compacted. Re-anchor from the ledger NOW before doing anything else.
@@ -39,7 +39,7 @@ Current decisions (2, newest first — read before proposing changes):
 <<<CODE-RECALL:UNTRUSTED-LEDGER-DATA:END>>>
 ```
 
-The agent re-anchors to the live `NOW` **with its reasoning** (why 24h TTL), sees the blocker *and its cause*, and sees the two decisions already in force — instead of re-deriving or contradicting them. This is produced by the real hook; the same content is pinned by a [CI regression test](#-selftest--ci) on Linux + Windows.
+The agent re-anchors to the live `NOW` **with its reasoning** (why 24h TTL), sees the blocker *and its cause*, and sees the two decisions already in force — instead of re-deriving or contradicting them. This is the real hook's output; a [CI regression test](#-selftest--ci) on Linux + Windows drives the actual hooks and pins this re-anchor *behavior* (the test uses its own fixture, not this exact ledger).
 
 <details>
 <summary>The whole ledger that produced it (3 short files)</summary>
