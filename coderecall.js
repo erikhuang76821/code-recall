@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.9.0.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.9.1.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -55,7 +55,7 @@ const DIGEST_DECISIONS_TOPN = 12;      // newest current-decision TITLES listed 
 const DIGEST_LESSONS_TOPN = 8;         // active-lesson TITLES surfaced alongside decisions (same anti-fragmentation rationale: the agent should SEE which pitfalls exist, not just their count). Listed after decisions so decisions win the shared fence budget.
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.9.0';
+const VERSION = '2.9.1';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -769,7 +769,13 @@ function buildDigest(opts) {
   if (opts.compact) {
     let body = neutralizeLedger(sanitize(taskText)).trim();
     if (body.length > TASK_BODY_MAX_CHARS) {
-      body = body.slice(0, TASK_BODY_MAX_CHARS) + '\n[coderecall: TASK.md truncated to budget]';
+      // The critical anchors (GOAL/NOW/NEXT above, blocked items below) are surfaced
+      // separately and always survive; only this convenience re-anchor copy is capped.
+      // Make the marker ACTIONABLE so a re-anchoring agent reads the intact on-disk file
+      // instead of trusting a partial embed (a bloated TASK.md is the real trigger — the
+      // fix is write hygiene, not a bigger cap).
+      body = body.slice(0, TASK_BODY_MAX_CHARS) +
+        '\n[coderecall: this embedded copy is truncated to budget — open .ai/memory/TASK.md on disk for the full, current state]';
     }
     ledgerParts.push('');
     ledgerParts.push('--- Full TASK.md ---');
@@ -2369,6 +2375,22 @@ function cmdSelftest() {
     check('compact digest embeds full TASK body', /--- Full TASK\.md ---/.test(compact));
     check('compact digest carries NEXT verbatim', /NEXT: add backpressure to stage 3/.test(compact));
     check('compact digest keeps untrusted fence', /UNTRUSTED-LEDGER-DATA:BEGIN/.test(compact));
+    // A bloated TASK.md: the embedded re-anchor copy is capped, but GOAL/NOW/NEXT are
+    // surfaced separately (survive) and the truncation marker points the agent to the
+    // intact on-disk file rather than trusting the partial embed.
+    {
+      const bdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-taskcap-'));
+      try {
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: bdir, stdio: 'ignore' });
+        const huge = ['# TASK', 'GOAL: ship it', 'NOW: wiring the live stage', 'NEXT: the live next step',
+          'UPDATED: ' + nowIso(), '', '## Checklist'].concat(
+          Array.from({ length: 400 }, (_, i) => '- [ ] padding checklist item ' + i + ' with enough text to blow the body cap')).join('\n');
+        fs.writeFileSync(path.join(bdir, '.ai', 'memory', 'TASK.md'), huge, 'utf8');
+        const bc = cp.execFileSync(process.execPath, [__filename, 'digest', '--compact'], { cwd: bdir, encoding: 'utf8' });
+        check('bloated TASK.md: truncation marker points to the on-disk file', /open \.ai\/memory\/TASK\.md on disk for the full, current state/.test(bc));
+        check('bloated TASK.md: live NOW still surfaced separately (survives truncation)', /NOW: wiring the live stage/.test(bc));
+      } finally { try { fs.rmSync(bdir, { recursive: true, force: true }); } catch (e) {} }
+    }
 
     // --- TASK field robustness (LevelTest field audit) ---
     // (a) Parser tolerates a bracketed "NOW【…】" / missing-colon drift so the
