@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.9.2.
+ * coderecall.js — Code Recall single-file zero-dependency CLI. Version 2.10.0.
  * Commands: init | sync [--all] | status | doctor [--selftest] | digest [--compact] | snapshot |
  *           consolidate | search | deinit | precommit | install-githook | remove-githook |
  *           graduate [--global] | mcp | selftest | version
@@ -55,7 +55,7 @@ const DIGEST_DECISIONS_TOPN = 12;      // newest current-decision TITLES listed 
 const DIGEST_LESSONS_TOPN = 8;         // active-lesson TITLES surfaced alongside decisions (same anti-fragmentation rationale: the agent should SEE which pitfalls exist, not just their count). Listed after decisions so decisions win the shared fence budget.
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.9.2';
+const VERSION = '2.10.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -558,6 +558,68 @@ function entryField(entry, field) {
     if (m) return m[1].trim();
   }
   return null;
+}
+
+/**
+ * Normalize a repo-relative path for comparison: backslashes → '/', drop a
+ * leading './'. Case is preserved (lower-casing would hide case-only renames on
+ * case-insensitive filesystems). No symlink resolution — pure text.
+ */
+function normRelPath(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '').trim();
+}
+
+/**
+ * Extract the local path an entry's `- code:` back-link points at, normalized.
+ * Reuses the doctor code-link rules: strip backticks, take the part before the
+ * `→`/`->` symbol, skip URLs and non-path-like values. Returns null if absent.
+ * Single source of truth for both `doctor` and `affected`.
+ */
+function entryCodePath(entry) {
+  const ref = entryField(entry, 'code');
+  if (!ref) return null;
+  const pathPart = ref.replace(/`/g, '').split(/\s*(?:→|->)\s*/)[0].trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(pathPart)) return null; // URL, not a local path
+  if (!pathPart || !/[\/\\.]/.test(pathPart)) return null;     // not path-like (no separator/ext)
+  return normRelPath(pathPart);
+}
+
+/**
+ * Does a changed file fall under an entry's code: path? Exact match always
+ * counts. Directory-prefix match (file under code/path/) is allowed ONLY when
+ * the code path has ≥2 segments — a 1-segment value like `src/` is too broad and
+ * would flag every commit (alert fatigue), so it only ever exact-matches. Prefix
+ * matching is path-segment-aware: `src/auth` matches `src/auth/x.ts`, never `src/authz.ts`.
+ */
+function fileMatchesCodePath(changedFile, codePath) {
+  const f = normRelPath(changedFile);
+  const c = normRelPath(codePath);
+  if (!f || !c) return false;
+  if (f === c) return true;
+  if (c.split('/').filter(Boolean).length < 2) return false; // too broad for prefix matching
+  return f.startsWith(c + '/');
+}
+
+/**
+ * Index of CURRENT (non-retired, non-expired) decisions + lessons, split by
+ * whether they carry a usable `code:` back-link. Powers `affected` and its
+ * coverage signal (entries with no code: are outside the file-level check —
+ * surfacing that count prevents the false-comfort "no matches = safe" trap).
+ */
+function currentEntriesIndex() {
+  const out = { withCode: [], withoutCode: 0, totalCurrent: 0 };
+  for (const [label, p] of [['DECISIONS.md', DECISIONS_FILE], ['LESSONS.md', LESSONS_FILE]]) {
+    const text = readFileSafe(p);
+    if (text === null) continue;
+    for (const e of parseEntries(text).entries) {
+      if (isRetiredStatus(entryStatus(e)) || entryExpired(e)) continue;
+      out.totalCurrent++;
+      const cp = entryCodePath(e);
+      if (cp) out.withCode.push({ label: label.replace('.md', ''), title: e.title, status: entryStatus(e), codePath: cp });
+      else out.withoutCode++;
+    }
+  }
+  return out;
 }
 
 function setEntryField(entry, field, value) {
@@ -1491,12 +1553,8 @@ function cmdDoctor() {
     if (text === null) continue;
     for (const e of parseEntries(text).entries) {
       if (isRetiredStatus(entryStatus(e))) continue;
-      const ref = entryField(e, 'code');
-      if (!ref) continue;
-      // Take the path portion: strip backticks, drop anything after → / -> (the symbol).
-      const pathPart = ref.replace(/`/g, '').split(/\s*(?:→|->)\s*/)[0].trim();
-      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(pathPart)) continue; // URL, not a local path — skip
-      if (!pathPart || !/[\/\\.]/.test(pathPart)) continue; // not path-like (no separator/ext) — skip
+      const pathPart = entryCodePath(e); // shared with `affected` (URLs / bare symbols already skipped)
+      if (!pathPart) continue;
       linkChecked++;
       if (!fs.existsSync(path.join(CWD, pathPart))) {
         linkStale++;
@@ -2190,6 +2248,78 @@ function gitOut(args) {
   } catch (e) { return null; }
 }
 
+/**
+ * Which CURRENT decisions/lessons govern a set of changed files, via their
+ * code: back-links. File-level only — an ADVISORY surface ("review these"),
+ * NOT semantic conflict detection. Returns { matches, coverage }. Shared by the
+ * `affected` command and the pre-commit nudge.
+ */
+function affectedMatches(changedFiles) {
+  const idx = currentEntriesIndex();
+  const files = (changedFiles || []).map(normRelPath).filter(Boolean);
+  const matches = [];
+  for (const e of idx.withCode) {
+    const hit = files.filter((f) => fileMatchesCodePath(f, e.codePath));
+    if (hit.length) matches.push({ label: e.label, title: e.title, status: e.status, codePath: e.codePath, files: hit });
+  }
+  return { matches, coverage: { withCode: idx.withCode.length, withoutCode: idx.withoutCode, totalCurrent: idx.totalCurrent } };
+}
+
+/**
+ * Resolve the changed-file set for `affected` per flags. Every git failure mode
+ * (not a repo, no HEAD yet, bad --base) degrades to an empty set + a note; the
+ * command still exits 0 (advisory, never fails a workflow).
+ */
+function affectedChangedFiles(opts) {
+  if (gitOut(['rev-parse', '--is-inside-work-tree']) !== 'true') {
+    return { files: [], note: 'not a git repo — nothing to compare' };
+  }
+  const lines = (out) => (out || '').split('\n').map((s) => s.trim()).filter(Boolean);
+  if (opts.base) {
+    if (gitOut(['rev-parse', '--verify', '--quiet', opts.base]) === null) {
+      return { files: [], note: 'base ref "' + opts.base + '" not found' };
+    }
+    const out = gitOut(['diff', '--name-only', opts.base + '...HEAD']);
+    return { files: lines(out), note: out === null ? 'could not diff against "' + opts.base + '"' : null };
+  }
+  if (opts.staged) return { files: lines(gitOut(['diff', '--cached', '--name-only'])), note: null };
+  // default: working tree vs HEAD; no commits yet → fall back to staged.
+  if (gitOut(['rev-parse', '--verify', '--quiet', 'HEAD']) === null) {
+    return { files: lines(gitOut(['diff', '--cached', '--name-only'])), note: 'no commits yet — comparing staged changes' };
+  }
+  return { files: lines(gitOut(['diff', '--name-only', 'HEAD'])), note: null };
+}
+
+function cmdAffected(args) {
+  requireLedger();
+  const opts = { staged: args.includes('--staged'), json: args.includes('--json'), base: null };
+  const bi = args.indexOf('--base');
+  if (bi !== -1 && args[bi + 1] && !args[bi + 1].startsWith('--')) opts.base = args[bi + 1];
+  const { files, note } = affectedChangedFiles(opts);
+  const { matches, coverage } = affectedMatches(files);
+  if (opts.json) {
+    console.log(JSON.stringify({ changedFiles: files, matches, coverage, note: note || undefined }, null, 2));
+    return;
+  }
+  console.log('coderecall affected — current decisions/lessons whose code: back-link covers your changed files.');
+  console.log('(advisory; file-level, NOT semantic conflict detection — review whether each still holds)');
+  if (note) console.log('note: ' + note);
+  console.log('');
+  if (matches.length === 0) {
+    console.log(files.length
+      ? 'No current decision/lesson is code:-linked to your ' + files.length + ' changed file(s).'
+      : 'No changed files to check.');
+  } else {
+    for (const m of matches) {
+      for (const f of m.files) console.log('  ⚠ ' + f);
+      console.log('      ↳ [' + m.label + '] "' + m.title + '" (' + m.status + ')  [code: ' + m.codePath + ']');
+    }
+  }
+  console.log('');
+  console.log('Coverage: ' + coverage.withCode + ' current entr(ies) carry a code: back-link and were checked; ' +
+    coverage.withoutCode + ' have none and are OUTSIDE this check — a clean result is not proof (search the topic, or add `code:` to widen).');
+}
+
 /** Resolve the repo's hooks directory (honors core.hooksPath), or null. */
 function gitHooksDir() {
   const top = gitOut(['rev-parse', '--show-toplevel']);
@@ -2268,6 +2398,21 @@ function cmdPrecommit(strict) {
       const tNow = parseTask(readFileSafe(TASK_FILE) || '');
       if (tNow && ledgerStale(tNow).stale) {
         console.log('  note: source staged but .ai/memory/TASK.md looks behind — refresh NOW:/NEXT: so the next session (and any teammate agent) re-anchors to current reality.');
+      }
+    }
+    // Affected-decision nudge (advisory, never blocks — even under --strict): staged
+    // source touches files a current decision/lesson is code:-linked to. Surfaces
+    // the decision to RE-CHECK; it does NOT claim a semantic violation. Silent when
+    // nothing matches (no fatigue). Same shared core as `coderecall affected`.
+    if (src.length) {
+      const { matches, coverage } = affectedMatches(src);
+      if (matches.length) {
+        const flat = matches.map((m) => '"' + m.title + '" (' + m.codePath + ')');
+        const shown = flat.slice(0, 5);
+        const extra = flat.length - shown.length;
+        console.log('  note: staged changes touch code governed by ' + matches.length + ' current decision(s)/lesson(s) — review they still hold: ' +
+          shown.join('; ') + (extra > 0 ? ' (+' + extra + ' more)' : '') +
+          '  [covers ' + coverage.withCode + '/' + coverage.totalCurrent + ' current entries with code: links; run `coderecall affected --staged`]');
       }
     }
   } catch (e) { /* best effort — never break the commit */ }
@@ -2584,6 +2729,52 @@ function cmdSelftest() {
       setPUpdated(nowIso());                                       // ledger fresh → self-quieting, no nudge
       check('precommit: fresh ledger does not nudge write-back', !/TASK\.md looks behind/.test(pc()));
     } catch (e) { /* git unavailable — skip nudge checks, don't fail the suite */ }
+
+    // --- affected: code:-driven decision ALERT (file-level, advisory; best-effort git) ---
+    try {
+      const atmp = fs.mkdtempSync(path.join(os.tmpdir(), 'coderecall-aff-'));
+      const agit = (a) => cp.execFileSync('git', a, { cwd: atmp, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      agit(['init']); agit(['config', 'user.email', 't@t']); agit(['config', 'user.name', 't']);
+      cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: atmp, stdio: 'ignore' });
+      const acr = (cmdArgs) => cp.execFileSync(process.execPath, [__filename].concat(cmdArgs), { cwd: atmp, encoding: 'utf8' });
+      // A file-linked decision, a dir-linked (2-seg) decision, a too-broad (1-seg)
+      // dir decision, a retired one, and a URL one — only the live, in-scope links match.
+      acr(['decision', 'Charge idempotency', '--decision', 'SETNX', '--code', 'src/pay/charge.js → chargeCard']);
+      acr(['decision', 'Auth module shape', '--decision', 'ports', '--code', 'src/auth/']);
+      acr(['decision', 'Broad src rule', '--decision', 'x', '--code', 'src/']);
+      acr(['decision', 'Old webhook policy', '--decision', 'gone', '--code', 'src/pay/charge.js']);
+      acr(['decision', 'Spec link', '--decision', 'z', '--code', 'https://ex.com/a.js']);
+      // Segment-aware negative: code: dir "pkg/aaa" must NOT match the sibling
+      // "pkg/aaaX.js" (only files under pkg/aaa/). Windows path: code: with
+      // backslashes must normalize and match a forward-slash changed file.
+      acr(['decision', 'Sibling guard', '--decision', 's', '--code', 'pkg/aaa']);
+      acr(['decision', 'Win path rule', '--decision', 'w', '--code', 'win\\dir\\file.js']);
+      // Retire "Old webhook policy" the real way (explicit supersede flips it to
+      // superseded); the replacement carries no code: so only the live links match.
+      acr(['decision', 'Webhook policy v2', '--decision', 'replaces old', '--supersedes', 'Old webhook policy']);
+      const mkstage = (rel, body) => { const fp = path.join(atmp, rel.replace(/\//g, path.sep)); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, body || 'x\n', 'utf8'); agit(['add', rel]); };
+      mkstage('src/pay/charge.js', 'charge\n');
+      mkstage('src/auth/session.js', 'sess\n');
+      mkstage('pkg/aaaX.js', 'sibling\n');   // sibling of code: pkg/aaa — must NOT match
+      mkstage('win/dir/file.js', 'win\n');   // matches code: win\dir\file.js after normalization
+      const aff = acr(['affected', '--staged']);
+      check('affected: file-linked decision surfaces on a matching staged file', /Charge idempotency/.test(aff));
+      check('affected: ≥2-segment dir link matches a file under it', /Auth module shape/.test(aff));
+      check('affected: retired (superseded) decision does NOT surface', !/Old webhook policy/.test(aff));
+      check('affected: too-broad 1-segment dir link (src/) does NOT match', !/Broad src rule/.test(aff));
+      check('affected: URL code: link is ignored', !/Spec link/.test(aff));
+      check('affected: segment-aware — sibling "pkg/aaaX.js" does NOT match dir "pkg/aaa"', !/Sibling guard/.test(aff));
+      check('affected: backslash code: path normalizes and matches a forward-slash file', /Win path rule/.test(aff));
+      check('affected: prints a coverage line (no false comfort)', /Coverage: .*OUTSIDE this check/.test(aff));
+      const affJson = JSON.parse(acr(['affected', '--staged', '--json']));
+      check('affected --json reports matches + coverage', Array.isArray(affJson.matches) && affJson.matches.length >= 2 && typeof affJson.coverage.withoutCode === 'number');
+      // Negative: a changed file under no link surfaces nothing but still reports coverage.
+      const aff2 = cp.execFileSync(process.execPath, [__filename, 'affected', '--base', 'HEAD'], { cwd: atmp, encoding: 'utf8' });
+      check('affected: bad/empty base degrades gracefully (exit 0, coverage shown)', /Coverage:/.test(aff2));
+      // Pre-commit fold-in: the staged match drives the advisory nudge, never blocks.
+      const apc = cp.execFileSync(process.execPath, [__filename, 'precommit'], { cwd: atmp, encoding: 'utf8' });
+      check('precommit: surfaces affected decisions for staged code (advisory)', /touch code governed by .* current decision/.test(apc) && /Charge idempotency/.test(apc));
+    } catch (e) { /* git unavailable — skip affected checks, don't fail the suite */ }
 
     // Drive the ACTUAL hook entry points (what Claude Code executes), not just
     // buildDigest — proves the injection/snapshot path works end to end.
@@ -3193,7 +3384,7 @@ function cmdMcp() {
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
-  const usage = 'usage: node coderecall.js <init|sync [--all]|status|check [--strict]|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|decision "<title>" [--context/--decision/--consequences/--status/--confidence/--code]|resolve-lesson "<title>" [--status resolved|obsolete] [--note ..]|reconfirm "<title>" [--file decisions|lessons] [--confidence ..]|mcp|score [--json]|selftest|version>';
+  const usage = 'usage: node coderecall.js <init|sync [--all]|status|check [--strict]|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|affected [--staged] [--base <ref>] [--json]|decision "<title>" [--context/--decision/--consequences/--status/--confidence/--code]|resolve-lesson "<title>" [--status resolved|obsolete] [--note ..]|reconfirm "<title>" [--file decisions|lessons] [--confidence ..]|mcp|score [--json]|selftest|version>';
   switch (cmd) {
     case 'init': return cmdInit();
     case 'sync': return cmdSync(args.includes('--all'));
@@ -3211,6 +3402,7 @@ function main() {
     case 'graduate': return cmdGraduate(args.includes('--global'));
     case 'decision': return cmdDecision(args);
     case 'decisions': return cmdDecisions(args.includes('--all'));
+    case 'affected': return cmdAffected(args);
     case 'resolve-lesson': return cmdResolveLesson(args);
     case 'reconfirm': return cmdReconfirm(args);
     case 'mcp': return cmdMcp();

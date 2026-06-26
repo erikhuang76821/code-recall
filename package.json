@@ -1,6 +1,6 @@
 {
   "name": "coderecall",
-  "version": "2.9.2",
+  "version": "2.10.0",
   "description": "Zero-dependency decision-persistence layer for AI coding agents — your decision log (why + dead-ends), kept across context compaction. No vector DB, no API keys, no cloud.",
   "bin": {
     "coderecall": "coderecall.js"
