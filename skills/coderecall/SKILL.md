@@ -36,12 +36,30 @@ context, and the ONLY thing guaranteed to survive context compaction.
 ## Writing rules
 
 - Keep each ledger file under ~1k tokens. Terse beats complete.
+- Recoverability test before you write: *could a competent engineer
+  reconstruct this from the code as it stands?* If yes, do NOT record it
+  — the ledger is for what code can't show (the why, the dead ends, the
+  pitfalls), never for what reading the code would reveal.
+- Optional `- code: <path → symbol>` on a decision/lesson back-links the
+  file it's about, so it stays navigable and `doctor` can flag it stale
+  when that path disappears.
 - Never paste conversation history; record only what constrains future
   reasoning.
 - Never write secrets (API keys, tokens, passwords) into the ledger.
 - Before appending to DECISIONS/LESSONS, check for an existing entry
   with a near-identical title — update it (refresh the date) instead of
   duplicating.
+
+## Retiring & re-confirming (mark, don't delete)
+
+- A lesson whose root cause is fixed is no longer a live trap: mark it
+  `resolved` (or `obsolete` if its premise is gone) —
+  `node coderecall.js resolve-lesson "<title>"`. It leaves default search
+  but stays available via `--history`, so the lesson is never lost.
+- When you verify an old decision/lesson still holds, `reconfirm` it
+  (`node coderecall.js reconfirm "<title>"`): this refreshes `updated:`
+  so recency ranking and the staleness flag treat it as fresh, without
+  rewriting the entry.
 
 ## Recovery after compaction
 
