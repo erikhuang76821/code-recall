@@ -174,7 +174,8 @@ sh install.sh                                          # macOS / Linux
 ## 🧰 指令一覽 (Command Reference)
 
 ```sh
-node coderecall.js <command>      # 或發佈後：npx coderecall <command>
+coderecall <command>              # 經 `npm link`（步驟 0）後可用;或從 clone 跑:
+node /path/to/code-recall/coderecall.js <command>
 ```
 
 | 指令 | 作用 |
@@ -347,7 +348,7 @@ DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈：寫入
 // Claude Desktop / Cursor / 任何 MCP client
 { "mcpServers": { "coderecall": { "command": "node", "args": ["<path>/code-recall/coderecall.js", "mcp"] } } }
 ```
-零依賴 stdio JSON-RPC，暴露 `read_memory` / `update_task` / `write_decision` / `write_lesson` / `resolve_lesson` / `reconfirm` / `search_memory`。把「榮譽制寫回」變成工具呼叫；檔案仍是儲存層，AGENTS.md 繼續覆蓋無 MCP 的工具。
+零依賴 stdio JSON-RPC，暴露 `read_memory` / `update_task` / `write_decision` / `write_lesson` / `resolve_lesson` / `reconfirm` / `search_memory` / `list_decisions`。把「榮譽制寫回」變成工具呼叫；檔案仍是儲存層，AGENTS.md 繼續覆蓋無 MCP 的工具。
 
 ### ♻️ 決策的「現行真相」與影響力治理 (influence governance)
 

@@ -175,7 +175,8 @@ No manual steps after that — hooks auto-inject the task digest at every sessio
 ## 🧰 Command Reference
 
 ```sh
-node coderecall.js <command>      # or, after publish: npx coderecall <command>
+coderecall <command>              # after `npm link` (step 0); or from a clone:
+node /path/to/code-recall/coderecall.js <command>
 ```
 
 | Command | What it does |
@@ -348,7 +349,7 @@ Two more lifecycle moves, both **mark-over-delete** (an entry is never destroyed
 // Claude Desktop / Cursor / any MCP client
 { "mcpServers": { "coderecall": { "command": "node", "args": ["<path>/code-recall/coderecall.js", "mcp"] } } }
 ```
-Zero-dep stdio JSON-RPC exposing `read_memory` / `update_task` / `write_decision` / `write_lesson` / `resolve_lesson` / `reconfirm` / `search_memory`. Turns honor-system write-back into a tool call; files remain the storage layer, AGENTS.md still covers non-MCP tools.
+Zero-dep stdio JSON-RPC exposing `read_memory` / `update_task` / `write_decision` / `write_lesson` / `resolve_lesson` / `reconfirm` / `search_memory` / `list_decisions`. Turns honor-system write-back into a tool call; files remain the storage layer, AGENTS.md still covers non-MCP tools.
 
 ### ♻️ Current truth & influence governance
 
