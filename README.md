@@ -13,15 +13,54 @@
 [![Version](https://img.shields.io/badge/version-2.9-orange.svg)](ROADMAP.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-Code Recall is a tiny **local decision ledger** for AI coding agents. It holds the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — in plain Markdown, and a SessionStart/PreCompact hook **re-injects it in front of the agent the moment context is lost** (session start, resume, before compaction). Not a memory database; not the cloud; not a governance platform. Zero dependencies, stays in the repo, the same setup across **Claude Code / Cursor / Gemini CLI**. Think **"Git for decisions" that survives compaction.**
+Code Recall is a tiny **local decision ledger** for AI coding agents. It holds the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — in plain Markdown, and a SessionStart hook **re-injects it in front of the agent the moment context resets** (session start, resume, and after compaction) — with a PreCompact hook snapshotting the conversation tail just before compaction (Claude Code native hooks; instruction-driven on other tools — see below). Not a memory database; not the cloud; not a governance platform. Zero dependencies, stays in the repo, the same setup across **Claude Code / Cursor / Gemini CLI**. Think **"Git for decisions" that survives compaction.**
 
 **Requirements** · Node ≥ 10.12 (anything since 2018; CI runs Node 18 / 20 × Linux / Windows).
 
 ---
 
-## 🔭 Vision
+## 🎬 See it — what the agent sees after a compaction
 
-Coding is commoditizing. The next differentiator isn't who writes code faster — it's who keeps **decisions** from being lost, rotting, or silently re-litigated. AI IDEs are already strong at `Retrieval → Reasoning → CodeGen`, but nearly blank on *persisting* the `Decision (why) → dead-ends (what failed)` layer — it lives only in the chat and evaporates on the next compaction. Code Recall aims to be the **local, zero-dependency foundation** for that layer: no cloud, no data egress, travels with the repo, so every AI agent sees current truth before it acts.
+A real ledger for *"add idempotency to the payments webhook."* Mid-task, the context window compacts. **Without** Code Recall the agent loses the thread — it re-proposes a design you already rejected, or re-adds the dedup key it just wrote. **With** it, the moment the new (post-compaction) context starts, Code Recall's SessionStart hook re-injects this (`coderecall digest --compact`, representative real output, trimmed):
+
+```text
+Context was just compacted. Re-anchor from the ledger NOW before doing anything else.
+…
+<<<CODE-RECALL:UNTRUSTED-LEDGER-DATA:BEGIN>>>
+GOAL: Add idempotency to the payments webhook so retries can't double-charge
+NOW: writing the Redis dedup key — chose a 24h TTL (Stripe retries up to 3 days, but our events expire in 24h)
+NEXT: backfill the last 7 days of events, then enable in prod behind a flag
+
+Blocked: - [!] backfill blocked — need prod Redis credentials from ops
+
+Current decisions (2, newest first — read before proposing changes):
+- Process webhooks async, ack immediately
+- Use Redis SETNX for webhook idempotency
+<<<CODE-RECALL:UNTRUSTED-LEDGER-DATA:END>>>
+```
+
+The agent re-anchors to the live `NOW` **with its reasoning** (why 24h TTL), sees the blocker *and its cause*, and sees the two decisions already in force — instead of re-deriving or contradicting them. This is the real hook's output; a [CI regression test](#-selftest--ci) on Linux + Windows drives the actual hooks and pins this re-anchor *behavior* (the test uses its own fixture, not this exact ledger).
+
+<details>
+<summary>The whole ledger that produced it (3 short files)</summary>
+
+```md
+# TASK   (.ai/memory/TASK.md)
+GOAL: Add idempotency to the payments webhook so retries can't double-charge
+NOW: writing the Redis dedup key — chose a 24h TTL (Stripe retries up to 3 days, but our events expire in 24h)
+NEXT: backfill the last 7 days of events, then enable in prod behind a flag
+UPDATED: 2026-06-26T10:00:00+08:00
+
+## Checklist
+- [x] reproduce the double-charge under webhook retry
+- [>] add the Redis SETNX idempotency key
+- [!] backfill blocked — need prod Redis credentials from ops
+```
+
+`DECISIONS.md` holds the two decisions above (Context / Decision / Consequences + status); `LESSONS.md` holds "don't retry X because Y" pitfalls. That's the entire format — plain Markdown, no schema to learn.
+</details>
+
+> **Honest scope of "automatic"** · Full auto-injection is **Claude Code** (native SessionStart/PreCompact hooks). On Cursor / Copilot / Windsurf / Codex it is **instruction-driven** — the protocol text in `AGENTS.md` *is* the hook, so it depends on the tool honoring it, not on a guaranteed lifecycle event. Per-tool reality: [COMPATIBILITY.md](COMPATIBILITY.md).
 
 ---
 
@@ -70,13 +109,15 @@ Code Recall follows a "subtractive" philosophy: condense memory into a few stati
 ### ✨ Core features
 
 - **🍃 Zero-dependency:** no DB, no background service, no network, zero npm runtime deps; 100% local files, code never leaves.
-- **🛡️ Compaction survival:** PreCompact snapshots before compaction; the post-compaction session re-anchors with the full TASK.md — the strongest in its class, backed by a [CI regression test](#-selftest--ci).
+- **🛡️ Compaction survival:** PreCompact snapshots before compaction; the post-compaction session re-anchors with the full TASK.md. This is the one claim we hold to evidence — a [CI regression test](#-selftest--ci) drives the real hooks on Linux + Windows and asserts the re-anchor every push.
 - **🤝 Cross-tool:** one `.ai/memory/`, read by every IDE/CLI via the `AGENTS.md` protocol; `git clone` carries it along.
 - **⚡ Token discipline:** only a compact, budget-capped digest is injected each session — the digest's fence content is hard-capped (~1.2 KB, a few hundred tokens), so the whole ledger is **not** stuffed into context; zero cost in non-Code-Recall projects.
 - **🔎 Searchable:** zero-dep BM25 lexical search (English & Chinese), covering cross-month recall.
 - **🧹 Anti-rot:** temporal/supersede/expire model + `doctor` lint + an optional git pre-commit gate minimize "stale ledger misleads you."
-- **🚨 Fail-loud, not fail-silent:** tolerant `TASK.md` parsing + digest/`doctor` warnings surface a malformed or append-drifted ledger — a missing-colon `NOW`, multiple `NOW` lines (appending instead of rewriting), or a `NOW` that's actually finished work — **before** the agent re-anchors to it, instead of silently shipping an empty/misleading anchor. `GOAL`/`NOW`/`NEXT` are parsed only in the header region, so a stray prose line deeper in the file can't hijack the current-state anchor. Authored ADR fields are never silently truncated on write, and the ledger lock carries an ownership token so a long-running write can't have its lock broken and deleted out from under it (no concurrent-writer corruption). (Hardened across 4 rounds of adversarial review against a real project whose ledger had drifted.)
+- **🚨 Fail-loud, not fail-silent:** tolerant `TASK.md` parsing + digest/`doctor` warnings surface a malformed or append-drifted ledger — a missing-colon `NOW`, multiple `NOW` lines (appending instead of rewriting), or a `NOW` that's actually finished work — **before** the agent re-anchors to it, instead of silently shipping an empty/misleading anchor. `GOAL`/`NOW`/`NEXT` are parsed only in the header region, so a stray prose line deeper in the file can't hijack the current-state anchor. Authored ADR fields are never silently truncated on write, and the ledger lock carries an ownership token so a long-running write can't have its lock deleted out from under it (no concurrent-writer corruption).
 - **🪟 Windows-first:** PowerShell installer, native Windows 11 support.
+
+> **What it can't do (honest limits)** · The ledger is only as good as its upkeep. If it stops being updated it becomes an *authoritative-looking stale error* — the mitigations are detection (`doctor` lint, the stale flag, fail-loud parsing), not prevention. And it **cannot tell when code has drifted from a decision** — that needs semantic understanding (an LLM/vectors), which is out of the zero-dep scope; Code Recall pushes the *current* decision in front of the agent and warns on write, maximizing the odds it's seen, but it does not detect contradictions. Auto-injection is guaranteed only on Claude Code (above).
 
 ---
 
@@ -87,10 +128,12 @@ Code Recall follows a "subtractive" philosophy: condense memory into a few stati
 ### 0. Make the `coderecall` command available (once per machine)
 
 ```sh
-npm i -g coderecall                 # after npm publish — `coderecall` works anywhere
-# or, from a local clone (no publish needed):
+# Install from source (current path — not yet published to npm):
 git clone https://github.com/erikhuang76821/code-recall && cd code-recall && npm link
+# npm i -g coderecall              # planned once published; will work anywhere
 ```
+
+> Not yet on npm and no tagged release yet — install from the clone above. Pre-1.0 in spirit; the version number tracks internal changes, not a published package.
 
 ### 1. Initialize memory inside a project (once per project)
 
@@ -218,9 +261,13 @@ Per-tool truth across the three layers (injection / write-back / compaction surv
   <img src="https://github.com/erikhuang76821/code-recall/blob/master/docs/assets/2.png?raw=true" alt="Code Recall — capture decisions, stay persistent, avoid re-litigation, episodic memory, local & zero-dependency" width="100%">
 </p>
 
-## 📊 Market scarcity — who treats *decision persistence* as the core?
+## 🔭 Why this layer exists
 
-Plenty of tools *record* decisions; almost none make **keeping stale decisions from misleading you while keeping current ones influential** their *core*. Most cover only one or two cells:
+Coding is commoditizing. The next differentiator isn't who writes code faster — it's who keeps **decisions** from being lost, rotting, or silently re-litigated. AI IDEs are already strong at `Retrieval → Reasoning → CodeGen`, but nearly blank on *persisting* the `Decision (why) → dead-ends (what failed)` layer — it lives only in the chat and evaporates on the next compaction. Code Recall aims to be a **local, zero-dependency foundation** for that layer: no cloud, no data egress, travels with the repo, so every AI agent sees current truth before it acts.
+
+## 📊 Where it sits among decision-memory tools
+
+Plenty of tools *record* decisions; few make **keeping stale decisions from misleading you while keeping current ones influential** their *core*. Most cover only one or two cells:
 
 | Capability | Memory Bank* | llm-wiki / Obsidian | mem0 / supermemory | ADR tools† | Knowie‡ | **Code Recall** |
 |---|---|---|---|---|---|---|
@@ -237,9 +284,9 @@ Plenty of tools *record* decisions; almost none make **keeping stale decisions f
 
 ADR tools have a status lifecycle but are human-authored and never surface to the agent or survive compaction. Memory banks auto-capture but have no decision-status lifecycle or influence governance (append-only → rot). Cloud memory (mem0 / supermemory) adds semantic recall but isn't local/zero-dep and has no ADR-style decision lifecycle.
 
-**The closest neighbor is [Knowie](https://github.com/timcsy/knowie)** — also local, zero-dependency, Markdown, "record the *why*, not retrieval." The dividing line is the **trigger model**: Knowie is **pull** — you invoke `/knowie-capture`, `/knowie-next` in chat, and it deliberately favors human-authored curation; Code Recall is **push** — lifecycle hooks fire at session start and before compaction, so no one has to *remember* to call them ([CI-proven](#-selftest--ci)) — plus a decision-status lifecycle Knowie doesn't carry. In return, Knowie has a vision/principles alignment layer and git-history migration Code Recall doesn't. Different bet, not a worse one. **Code Recall's uncontested cell is the bottom stack: AI-maintained decision lifecycle + influence governance + auto-surfacing across compaction, all local and zero-dependency.**
+**The closest neighbor is [Knowie](https://github.com/timcsy/knowie)** — also local, zero-dependency, Markdown, "record the *why*, not retrieval." The dividing line is the **trigger model**: Knowie is **pull** — you invoke `/knowie-capture`, `/knowie-next` in chat, and it deliberately favors human-authored curation; Code Recall is **push** — lifecycle hooks fire at session start and before compaction, so no one has to *remember* to call them ([CI-proven](#-selftest--ci)) — plus a decision-status lifecycle Knowie doesn't carry. In return, Knowie has a vision/principles alignment layer and git-history migration Code Recall doesn't. Different bet, not a worse one. **The corner Code Recall focuses on: AI-maintained decision lifecycle + influence governance + auto-surfacing across compaction, all local and zero-dependency** — a combination few tools target today.
 
-> **Honest positioning** · We do **not** compete with mem0/supermemory on semantic recall or multi-modality (that's the cloud products' home turf), and we do **not** build a governance/approval engine. Against the nearest local peer: **Knowie waits for you to ask; Code Recall shows up on its own** — hooks fire at session start and before compaction (strongest on Claude Code, where native hooks exist; instruction-driven elsewhere). Code Recall's moat is "local, zero-dependency, decision lifecycle + surviving compaction." Per-tool reality in [COMPATIBILITY.md](COMPATIBILITY.md); competitive assessment in [ROADMAP.md](ROADMAP.md).
+> **Honest positioning** · We do **not** compete with mem0/supermemory on semantic recall or multi-modality (that's the cloud products' home turf), and we do **not** build a governance/approval engine. Against the nearest local peer: **Knowie waits for you to ask; Code Recall shows up on its own** — hooks fire at session start and before compaction (strongest on Claude Code, where native hooks exist; instruction-driven elsewhere). What's distinctive is the bundle: local, zero-dependency, decision lifecycle + surviving compaction. Per-tool reality in [COMPATIBILITY.md](COMPATIBILITY.md); competitive assessment in [ROADMAP.md](ROADMAP.md).
 
 ---
 
