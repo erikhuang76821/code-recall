@@ -135,6 +135,17 @@ git clone https://github.com/erikhuang76821/code-recall && cd code-recall && npm
 
 > Not yet on npm — install from the clone above. Tagged releases are on the [Releases](https://github.com/erikhuang76821/code-recall/releases) page; `coderecall` is not yet a published npm package.
 
+> **Prefer no global install?** `npm link` is optional. The CLI binds its ledger to the directory you run it *from* (`process.cwd()`), **not** to where the clone lives — so **one clone serves every project**. Just clone it once (e.g. beside your projects) and either run `node /path/to/code-recall/coderecall.js <command>` from any project, or add a one-time shell alias:
+> ```sh
+> # bash/zsh (~/.bashrc) — use an ABSOLUTE path so it works from any project, not just siblings:
+> alias coderecall='node /abs/path/code-recall/coderecall.js'
+> ```
+> ```powershell
+> # PowerShell ($PROFILE):
+> function coderecall { node C:\abs\path\code-recall\coderecall.js @args }
+> ```
+> Then `coderecall init` works in every project, and each gets its own independent `.ai/memory/` — the tool folder is never polluted. (Claude Code's *auto-injection hooks* are separate: register them once with `install.ps1`/`install.sh`; they no-op in projects without `.ai/memory/`.)
+
 ### 1. Initialize memory inside a project (once per project)
 
 ```sh
@@ -175,7 +186,8 @@ No manual steps after that — hooks auto-inject the task digest at every sessio
 ## 🧰 Command Reference
 
 ```sh
-node coderecall.js <command>      # or, after publish: npx coderecall <command>
+coderecall <command>              # after `npm link` (step 0); or from a clone:
+node /path/to/code-recall/coderecall.js <command>
 ```
 
 | Command | What it does |
@@ -348,7 +360,7 @@ Two more lifecycle moves, both **mark-over-delete** (an entry is never destroyed
 // Claude Desktop / Cursor / any MCP client
 { "mcpServers": { "coderecall": { "command": "node", "args": ["<path>/code-recall/coderecall.js", "mcp"] } } }
 ```
-Zero-dep stdio JSON-RPC exposing `read_memory` / `update_task` / `write_decision` / `write_lesson` / `resolve_lesson` / `reconfirm` / `search_memory`. Turns honor-system write-back into a tool call; files remain the storage layer, AGENTS.md still covers non-MCP tools.
+Zero-dep stdio JSON-RPC exposing `read_memory` / `update_task` / `write_decision` / `write_lesson` / `resolve_lesson` / `reconfirm` / `search_memory` / `list_decisions`. Turns honor-system write-back into a tool call; files remain the storage layer, AGENTS.md still covers non-MCP tools.
 
 ### ♻️ Current truth & influence governance
 
