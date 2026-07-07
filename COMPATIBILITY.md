@@ -1,4 +1,4 @@
-# Code Recall Compatibility Matrix (v2.0.0)
+# Code Recall Compatibility Matrix
 
 > 繁中摘要：Code Recall 對每個工具的支援分三層 — **被動注入**（工具自動載入協定/摘要）、
 > **寫回**（agent 更新帳本的機制：確定性 hooks vs 指令協議「榮譽制」）、

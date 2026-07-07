@@ -10,7 +10,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml/badge.svg)](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-2.9.2-orange.svg)](https://github.com/erikhuang76821/code-recall/releases)
+[![Version](https://img.shields.io/badge/version-2.10.0-orange.svg)](https://github.com/erikhuang76821/code-recall/releases)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 Code Recall is a tiny **local decision ledger** for AI coding agents. It holds the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — in plain Markdown, and a SessionStart hook **re-injects it in front of the agent the moment context resets** (session start, resume, and after compaction) — with a PreCompact hook snapshotting the conversation tail just before compaction (Claude Code native hooks; instruction-driven on other tools — see below). Not a memory database; not the cloud; not a governance platform. Zero dependencies, stays in the repo, the same setup across **Claude Code / Cursor / Gemini CLI**. Think **"Git for decisions" that survives compaction.**
