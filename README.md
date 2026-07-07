@@ -10,7 +10,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml/badge.svg)](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-2.10.0-orange.svg)](https://github.com/erikhuang76821/code-recall/releases)
+[![npm](https://img.shields.io/npm/v/%40erikhuang%2Fcoderecall?label=npm&color=orange)](https://www.npmjs.com/package/@erikhuang/coderecall)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 Code Recall is a tiny **local decision ledger** for AI coding agents. It holds the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — in plain Markdown, and a SessionStart hook **re-injects it in front of the agent the moment context resets** (session start, resume, and after compaction) — with a PreCompact hook snapshotting the conversation tail just before compaction (Claude Code native hooks; instruction-driven on other tools — see below). Not a memory database; not the cloud; not a governance platform. Zero dependencies, stays in the repo, the same setup across **Claude Code / Cursor / Gemini CLI**. Think **"Git for decisions" that survives compaction.**
@@ -128,12 +128,13 @@ Code Recall follows a "subtractive" philosophy: condense memory into a few stati
 ### 0. Make the `coderecall` command available (once per machine)
 
 ```sh
-# Install from source (current path — not yet published to npm):
+# Install from npm (recommended):
+npm i -g @erikhuang/coderecall    # the installed command is `coderecall`
+# Or install from source:
 git clone https://github.com/erikhuang76821/code-recall && cd code-recall && npm link
-# npm i -g coderecall              # planned once published; will work anywhere
 ```
 
-> Not yet on npm — install from the clone above. Tagged releases are on the [Releases](https://github.com/erikhuang76821/code-recall/releases) page; `coderecall` is not yet a published npm package.
+> On npm as [`@erikhuang/coderecall`](https://www.npmjs.com/package/@erikhuang/coderecall) — scoped because the unscoped name collides with an unrelated existing package; **the installed command is still `coderecall`**. Tagged releases are on the [Releases](https://github.com/erikhuang76821/code-recall/releases) page.
 
 > **Prefer no global install?** `npm link` is optional. The CLI binds its ledger to the directory you run it *from* (`process.cwd()`), **not** to where the clone lives — so **one clone serves every project**. Just clone it once (e.g. beside your projects) and either run `node /path/to/code-recall/coderecall.js <command>` from any project, or add a one-time shell alias:
 > ```sh
@@ -186,7 +187,7 @@ No manual steps after that — hooks auto-inject the task digest at every sessio
 ## 🧰 Command Reference
 
 ```sh
-coderecall <command>              # after `npm link` (step 0); or from a clone:
+coderecall <command>              # after the global install (step 0); or from a clone:
 node /path/to/code-recall/coderecall.js <command>
 ```
 
