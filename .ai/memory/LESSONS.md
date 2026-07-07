@@ -46,3 +46,11 @@ On a real non-author project (LevelTest), TASK.md drifted to `NOW【tag】body` 
 - date: 2026-06-23
 - confidence: high
 Codex 3-round adversarial review of the TASK-parse fix: Round 1 said "add the warning to the digest, not just doctor" (done) → Round 2 still returned "qualified no" with ONE blocker: in `--compact` the malformed-ledger warnings were emitted AFTER `<<<…END>>>`, and the fence holds the full TASK body — so a compacted agent read the stale completed-NOW logs BEFORE the distrust signal. My "warn now, reorder later" deferral was invalid: the warning never preceded the content it warned about. Fix: move all three warnings BEFORE `LEDGER_FENCE_BEGIN` (commit c7d8b68), so distrust precedes the stale body in both plain and compact; +selftest asserting `indexOf(warning) < indexOf(fence-begin)`. Lesson: for any injected-context tool, a correctness warning is only effective if it is READ BEFORE the thing it distrusts — placement in the prompt stream is part of the warning's correctness, not cosmetic. Also: the value of multi-round adversarial review is that R2/R3 catch the SHAPE of a fix that R1's one-liner ("just add a warning") quietly got wrong. Verdict reached qualified-yes only after the reorder.
+
+## r/ClaudeAI feed posts gated by OP karma >= 50 — cold accounts get auto-removed
+- date: 2026-07-07
+- updated: 2026-07-07
+- status: accepted
+- confidence: high
+- aliases: reddit launch venue gate karma megathread showcase cold account
+Launch attempt 2026-07-07: posted the prepared launch text to r/ClaudeAI from a fresh account (Thick-Reason9783). Post t3_1upq6xo was removed by mods within minutes. Root cause: subreddit now requires OP total karma >= 50 for Showcase posts on the feed; new accounts are redirected to the Built with Claude Project Showcase Megathread (comment there instead, links/images welcome). Do not burn more launch attempts on karma-gated feeds from cold accounts: either build karma first, pick venues without karma gates, or use the sanctioned megathread. Reddit RTE also escapes markdown typed via automation — switch composer to Markdown mode before entering text.
