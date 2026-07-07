@@ -1,6 +1,7 @@
 # Launch draft — r/ClaudeAI (NOT YET PUBLISHED)
 
-Status: **draft**. Do not post until the demo GIF exists and the author approves.
+Status: **draft**. Do not post until the author approves. (GIF dropped for the
+first launch — the real digest embeds as a text block; see Pre-publish checklist.)
 Venue: r/ClaudeAI. Hook: "reverses its own code after a compaction."
 This is part of the trustworthy-adoption proof (distribution-first; strangers-only).
 See the ADR "Trustworthy-adoption proof" in `.ai/memory/DECISIONS.md`.

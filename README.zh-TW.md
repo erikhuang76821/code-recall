@@ -10,7 +10,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml/badge.svg)](https://github.com/erikhuang76821/code-recall/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-2.9.2-orange.svg)](https://github.com/erikhuang76821/code-recall/releases)
+[![Version](https://img.shields.io/badge/version-2.10.0-orange.svg)](https://github.com/erikhuang76821/code-recall/releases)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 Code Recall 是給 AI coding agent 的一個極輕量**本地決策 ledger**。它保存專案最容易弄丟、也最難重建的東西——**為什麼當初這樣做、哪些路已被證明走不通**——用純 Markdown 存,並由 SessionStart hook 在 **context 重置的那一刻把它重新注入到 agent 面前**(session 啟動、resume、壓縮後)——另有 PreCompact hook 在壓縮前先把對話尾端快照下來(這是 Claude Code 原生 hook;其他工具為指令驅動,見下)。不是記憶資料庫,不上雲,不是治理平台。零依賴、留在 repo 裡,Claude Code / Cursor / Gemini CLI 同一套設定。就是「**撐過 compaction 的決策版 Git**」。

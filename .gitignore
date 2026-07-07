@@ -1,6 +1,10 @@
 .claude/
 *.tmp.*
 
+# stray tool output (accidental agent/CLI runs in repo root)
+/assets/
+*$LOG*
+
 # coderecall transient runtime state (per-machine, never committed)
 .ai/memory/.heartbeat
 .ai/memory/.reminder
