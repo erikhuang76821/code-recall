@@ -185,3 +185,14 @@ Three further gaps: (1) `consolidate` retires ONLY entries explicitly marked sup
 **Context:** External critique named ledger rot the #1 risk (agent edits code, ignores/contradicts a DECISION) and asked for a Conflict Alert. Semantic 'did this diff violate decision X' needs an LLM/vectors — out of zero-dep scope (already a documented limit).
 **Decision:** Ship 'coderecall affected' + a pre-commit nudge that cross-references changed files against current entries' existing 'code:' back-link. ALERT (surfaces decisions governing the touched files to re-check), NOT DETECTION (no semantic judgement). Advisory, never blocks (even --strict). Always prints a coverage line (entries with/without code:) so a clean result is not mistaken for proof. Dir links need >=2 segments for prefix match; segment-aware; URLs/symbols skipped. MCP deferred.
 **Consequences:** Reuses code: (no new field); gives code: a direct incentive (link it, get a guardrail). Bounded: file-level only, only code:-linked entries covered, can't tell if you actually violated it. Converged over 2 Codex rounds (need + conservative scope).
+
+## npm 以 scoped 名 @erikhuang/coderecall 發佈;bin 指令維持 coderecall
+- date: 2026-07-07
+- updated: 2026-07-07
+- status: accepted
+- confidence: med
+- code: package.json
+- aliases: npm publish scope naming collision typosquat code-recall branding
+**Context:** 2026-07-07 首次 npm publish 連撞三堵牆:(1) 帳號無 2FA(E403,使用者已啟用);(2) unscoped coderecall 被 npm 相似度檢查拒絕——既有套件 code-recall 是活產品(Ultra-fast MCP server for semantic memory and code analysis,maintainer abians7,2026-01 仍有更新),與本專案同賽道不同定位。
+**Decision:** 採 npm 官方建議的 scoped 名 @erikhuang/coderecall + publishConfig.access=public(PR #42,merge 81f0bb1)。bin 名不變:裝完指令仍是 coderecall。README 安裝路徑更新刻意延後到 publish 實際成功後才改(誠實紀律)。
+**Consequences:** 安裝指令變長(npm i -g @erikhuang/coderecall)。品牌後續:Google/npm 搜尋 code recall 會先撞到同賽道的 code-recall MCP server——Gate1 文案要靠 compaction-survival 差異化定位,長期若商業化需重新評估品牌名。
