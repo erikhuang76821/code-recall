@@ -361,6 +361,14 @@ Two more lifecycle moves, both **mark-over-delete** (an entry is never destroyed
 // Claude Desktop / Cursor / any MCP client
 { "mcpServers": { "coderecall": { "command": "node", "args": ["<path>/code-recall/coderecall.js", "mcp"] } } }
 ```
+```toml
+# Codex (CLI / Desktop / IDE share one config) — ~/.codex/config.toml
+[mcp_servers.coderecall]
+command = "node"
+args = ['<path>/code-recall/coderecall.js', "mcp"]
+```
+> **One global registration, many projects — read this.** The server resolves `.ai/memory/` from its **launch cwd, once at startup**. A single global entry is therefore only correct if your client spawns the server *per project*. Verified 2026-08-14 on Codex CLI launched as `codex -C <project>`: two concurrent sessions produced two separate server processes, each reading its own project's ledger. **Not** verified: clients that switch project folder *without restarting* — those could keep a server bound to the first project, silently. When unsure, call `read_memory` (read-only) and check the `GOAL:` it returns is the project you think you're in.
+
 Zero-dep stdio JSON-RPC exposing `read_memory` / `update_task` / `write_decision` / `write_lesson` / `resolve_lesson` / `reconfirm` / `search_memory` / `list_decisions`. Turns honor-system write-back into a tool call; files remain the storage layer, AGENTS.md still covers non-MCP tools.
 
 ### ♻️ Current truth & influence governance
