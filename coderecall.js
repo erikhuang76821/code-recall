@@ -1260,7 +1260,7 @@ function cmdInit() {
   console.log('stay local (per-developer). Edit the .gitignore block to change this.');
   console.log('');
   console.log('Model: run `coderecall init` inside EACH project you want tracked (memory is per-project).');
-  console.log('The tool installs ONCE per machine: `npm i -g coderecall` (or `npm link` from the source folder).');
+  console.log('The tool installs ONCE per machine: `npm i -g @erikhuang/coderecall` (or `npm link` from the source folder).');
   console.log('No global install needed — the CLI binds to your cwd, so `node <clone>/coderecall.js <cmd>` works');
   console.log('from any project (alias it for convenience). Claude Code hooks: run install.ps1 / install.sh once.');
   console.log('Optional: coderecall sync --all  (stubs for Cursor/Windsurf/Cline/Roo/Copilot/Gemini)');
@@ -3438,7 +3438,7 @@ function main() {
       console.log(usage);
       console.log('');
       console.log('Memory is per-project: run `init` inside each project you want tracked (creates ./.ai/memory/).');
-      console.log('Install the tool + Claude Code hooks once per machine: `npm i -g coderecall` (or `npm link`), then install.ps1 / install.sh.');
+      console.log('Install the tool + Claude Code hooks once per machine: `npm i -g @erikhuang/coderecall` (or `npm link`), then install.ps1 / install.sh.');
       return;
     default:
       fail('unknown command "' + cmd + '". ' + usage);

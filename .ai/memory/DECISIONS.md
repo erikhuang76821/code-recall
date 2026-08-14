@@ -196,3 +196,15 @@ Three further gaps: (1) `consolidate` retires ONLY entries explicitly marked sup
 **Context:** 2026-07-07 首次 npm publish 連撞三堵牆:(1) 帳號無 2FA(E403,使用者已啟用);(2) unscoped coderecall 被 npm 相似度檢查拒絕——既有套件 code-recall 是活產品(Ultra-fast MCP server for semantic memory and code analysis,maintainer abians7,2026-01 仍有更新),與本專案同賽道不同定位。
 **Decision:** 採 npm 官方建議的 scoped 名 @erikhuang/coderecall + publishConfig.access=public(PR #42,merge 81f0bb1)。bin 名不變:裝完指令仍是 coderecall。README 安裝路徑更新刻意延後到 publish 實際成功後才改(誠實紀律)。
 **Consequences:** 安裝指令變長(npm i -g @erikhuang/coderecall)。品牌後續:Google/npm 搜尋 code recall 會先撞到同賽道的 code-recall MCP server——Gate1 文案要靠 compaction-survival 差異化定位,長期若商業化需重新評估品牌名。
+
+## MCP ledger binding: docs-only, no disclosure tool before Gate1
+- date: 2026-08-14
+- updated: 2026-08-14
+- status: accepted
+- confidence: high
+- code: coderecall.js → CWD/MEM_DIR
+- aliases: cwd binding mcp global registration codex config.toml
+- supersedes: MCP ledger binding: docs-only, no disclosure tool before Gate1
+**Context:** MCP binds MEM_DIR from launch cwd once at startup (coderecall.js top-level CWD/MEM_DIR consts), so a single global registration relies entirely on the client spawning per project; nothing in the running server discloses which ledger it is on. Codex CLI 'codex -C <project>' verified 2026-08-14: two concurrent sessions produced distinct PIDs and each read only its own ledger (read-only read_memory probe, no artifacts).
+**Decision:** Document the verified scope only (README EN+zh, COMPATIBILITY). Do NOT build a binding-disclosure tool, and do NOT add CODERECALL_ROOT, before Gate1.
+**Consequences:** Reopen triggers: (a) a client observed reusing one MCP process across a project switch; (b) a user reports a misbinding; (c) a client observed spawning from a non-project cwd. Preferred shape if reopened: ONE read-only tool returning launch cwd + resolved ledger dir + file existence — not per-write path echo (recurring token cost, and it only detects after the wrong ledger was already written). CODERECALL_ROOT rejected: cwd also governs AGENTS.md, graduated ADRs, git ops and the lock, so a partial override splits state and a full one defeats hooks that chdir deliberately; a static root also cannot solve dynamic project selection.

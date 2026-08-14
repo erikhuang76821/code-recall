@@ -360,6 +360,14 @@ DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈：寫入
 // Claude Desktop / Cursor / 任何 MCP client
 { "mcpServers": { "coderecall": { "command": "node", "args": ["<path>/code-recall/coderecall.js", "mcp"] } } }
 ```
+```toml
+# Codex（CLI / Desktop / IDE 共用同一份設定）— ~/.codex/config.toml
+[mcp_servers.coderecall]
+command = "node"
+args = ['<path>/code-recall/coderecall.js', "mcp"]
+```
+> **一次全域註冊、服務多專案 — 這段請讀。** server 是在**啟動當下、依 launch cwd** 解析 `.ai/memory/`，之後不再變。所以單一全域註冊只有在你的 client **每個專案各自 spawn** 時才正確。已於 2026-08-14 在 Codex CLI 以 `codex -C <專案>` 啟動的情況下驗證：兩個並行 session 產生兩個獨立的 server process，各自讀到自己專案的 ledger。**未**驗證：不重啟就切換專案資料夾的 client —— 那可能讓 server 靜默地一直綁在第一個專案上。不確定時就呼叫 `read_memory`（唯讀），確認回傳的 `GOAL:` 是你以為的那個專案。
+
 零依賴 stdio JSON-RPC，暴露 `read_memory` / `update_task` / `write_decision` / `write_lesson` / `resolve_lesson` / `reconfirm` / `search_memory` / `list_decisions`。把「榮譽制寫回」變成工具呼叫；檔案仍是儲存層，AGENTS.md 繼續覆蓋無 MCP 的工具。
 
 ### ♻️ 決策的「現行真相」與影響力治理 (influence governance)
