@@ -92,8 +92,15 @@ function Test-IsMemoStarEntry {
         $cmdProp = $h.PSObject.Properties['command']
         if ($null -eq $cmdProp -or $null -eq $cmdProp.Value) { continue }
         $cmd = [string]$cmdProp.Value
-        if ($cmd -match '(?i)coderecall') { return $true }
-        if ($cmd.ToLowerInvariant().Contains($HooksDir.ToLowerInvariant())) { return $true }
+        # The command is written as JSON, so a Windows path is stored with DOUBLED
+        # backslashes while $HooksDir has single ones, and 'coderecall' does not
+        # appear in a clone named code-recall. Comparing them raw made a re-run
+        # append a second copy of every hook while reporting 'already there'.
+        $np = { param($x) $x.ToLowerInvariant().Replace('\\', '\').Replace('/', '\') }
+        $nc = & $np $cmd
+        if ($nc -match '(?i)coderecall') { return $true }
+        if ($nc.Contains((& $np $HooksDir))) { return $true }
+        if ($nc -match '(?i)(sessionstart|precompact|stop|userpromptsubmit)\.js') { return $true }
     }
     return $false
 }

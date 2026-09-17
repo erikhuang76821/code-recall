@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.15.0 (2026-09-17)
+
+**One command sets up the clients on this machine, the skill is placed where tools actually look for it, and a duplicate-hook bug in both installers is fixed.**
+
+- **`coderecall setup`** detects Claude Code and Codex CLI, registers what each one needs, and reports per action. Non-interactive by design: `--client claude|codex|all`, `--user` for Codex user-level, `--mcp` for a project `.mcp.json`. It replaces "find install.ps1 inside the npm package and hope you picked the right OS" — `init` now points at it.
+- **The Claude Code hook merge moved from the shell/PowerShell installers into the CLI**, so there is one implementation instead of two that can drift. Same guarantees: backup first, never clobber, refuse an unparseable settings.json, refuse shell-unsafe paths, absolute node path.
+- **Both installers duplicated every hook on a re-run.** The command is written through `JSON.stringify`, so a Windows path is stored with DOUBLED backslashes while the needle had single ones — and "coderecall" does not appear in a clone named `code-recall`. So the "is this already ours?" test matched nothing, and a second run appended a second copy of all three hooks while printing that they were already there. Fixed in `setup`, `install.sh` and `install.ps1`; pinned by `selftest`. Measured before the fix: three runs produced three copies.
+- **`setup` never says "verified".** Writing a config file is reported as `registered`; whether the client actually ran the hook is something only the client can demonstrate. It also names the sources it did NOT inspect (plugin-bundled hooks, managed policy), instead of implying a clean sweep.
+- **The skill is installed into the project (B6):** `.agents/skills/coderecall/SKILL.md` (the cross-vendor convention Codex CLI reads) and `.claude/skills/coderecall/SKILL.md`. `AGENTS.md` keeps the minimal behavioural contract for tools that never trigger a skill; the skill carries the detail and costs nothing until loaded. Both are plain files that belong in the repo — unlike the generated hook configs, they contain no machine paths.
+- **`deinit` takes them back out**, including the generated `.codex/hooks.json`, and removes the directories it created while leaving any of your own content in `.claude/` or `.agents/` untouched.
+- `selftest` 152 → 166.
+
 ## v2.14.0 (2026-09-17)
 
 **`coderecall sync --codex` registers the SessionStart hook with Codex CLI — and two measured Windows/Codex traps that make hooks fail silently are now detected instead of shipped.**
