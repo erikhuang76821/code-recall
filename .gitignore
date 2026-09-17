@@ -22,4 +22,5 @@
 .ai/memory/.reminder
 .ai/memory/.lock/
 .ai/memory/.backups/
+.codex/hooks.json
 # <<< coderecall <<<

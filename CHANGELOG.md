@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.14.0 (2026-09-17)
+
+**`coderecall sync --codex` registers the SessionStart hook with Codex CLI — and two measured Windows/Codex traps that make hooks fail silently are now detected instead of shipped.**
+
+- **`sync --codex`** writes a `SessionStart` hook (matcher `startup|resume|clear|compact`) into `<project>/.codex/hooks.json`, or `~/.codex/hooks.json` with `--user`. Verified end to end: a live `codex exec` with the generated config injected the ledger and gpt-6-astra quoted the `GOAL:` line back.
+- **Silent trap 1 — the Windows command form.** A `commandWindows` that starts with a quoted absolute path (`"C:\Program Files\nodejs\node.exe" "<script>"`, the form the Claude Code installer uses) makes Codex skip the hook with no error at all: the model simply gets no context. Isolated by bisection against a live Codex — script path style and the extra fields are all fine; only the leading-quote node path fails, and running the identical string through cmd.exe directly succeeds. The generator emits `node "<script>"`, `doctor` flags the bad form, and `selftest` pins it.
+- **Silent trap 2 — project trust.** A project-level `.codex/hooks.json` is not loaded at all in an untrusted project, and `--dangerously-bypass-hook-trust` does not cover that (it bypasses hook trust, not project trust). Measured: a probe hook in a fresh directory never executed; the same probe in a trusted project did. `doctor` now reports it.
+- **`doctor` gained a `[codex]` section**: whether a hook is registered (project or user level), whether the command form is one Codex will actually run, whether the project looks trusted, whether a `[hooks.state]` trust entry exists, and whether `node` resolves on PATH (the hook command needs it).
+- **The generated file is gitignored.** It embeds this machine's absolute paths, so committing it would hand teammates a hook pointing at a directory they do not have — which, per trap 1, fails quietly.
+- **Deliberately not registered:** `PreCompact` (our `precompact.js` parses Claude's transcript shape, so under Codex it would write an empty snapshot and look like it worked) and `Stop` (unverified under Codex). Shipping a hook that silently does nothing is worse than shipping none.
+- `selftest` 140 → 152.
+
 ## v2.13.0 (2026-09-17)
 
 **The digest now tells the truth about what it showed.** On this project's own ledger it printed the header "Current decisions — 12 of 24 shown", then 8 titles, the last cut mid-word, and dropped the entire "Active lessons" section without a word. Everything was concatenated and the result sliced at 1200 chars, so whichever section came last lost.
