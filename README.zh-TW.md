@@ -206,7 +206,7 @@ node /path/to/code-recall/coderecall.js <command>
 | `doctor [--selftest]` | 健診（hooks/帳本/路徑/lint/Codex 32KiB）；`--selftest` 加跑回歸測試 |
 | `score [--json]` | 評估工作狀態健康度（GOAL 清晰度 / NEXT 可執行性 / blockers 有無理由 / 新鮮度） |
 | `decision "<title>" [--context/--decision/--consequences/--status/--confidence] [--supersedes "<舊標題/關鍵字>"] [--code "<path → symbol>"]` | 一行記下一筆 ADR 決策；`--supersedes` 顯式取代既有決策（不靠標題相似度）；`--code` 回連它治理的檔案/符號（路徑消失時 `doctor` 會示警）；`--aliases "<同義詞/舊名>"` 加額外搜尋詞，讓詞法搜尋能用標題/內文以外的字找到它 |
-| `search <query> [--limit N] [--history]` | 詞法搜尋，**預設只回現行真相**（superseded/deprecated/resolved/obsolete/archive 排除）；`--history` 才含歷史（標 `[superseded]` / `[resolved]`） |
+| `search <query> [--limit N] [--history] [--full]` | 詞法搜尋,回的是**理由正文**而不只是標題;**預設只回現行真相**（superseded/deprecated/resolved/obsolete/archive 排除）；`--history` 才含歷史（標 `[superseded]` / `[resolved]`）;`--full` 印出整條(有上限) |
 | `decisions [--all]` | **HEAD 視圖**：列出目前 accepted 的決策（`--all` 含已取代/棄用） |
 | `affected [--staged] [--base <ref>] [--json]` | 列出 `code:` 連結涵蓋「你改動的檔案」的現行決策/教訓（勸告;檔案層級,**非**語意衝突偵測）——在你牴觸它之前把該重看的攤出來。會報覆蓋率,避免把「沒命中」誤當「安全」 |
 | `resolve-lesson "<title>" [--status resolved\|obsolete] [--note ".."]` | 退役一筆教訓：根因已修（`resolved`）或前提已不存在（`obsolete`）——保留且可經 `--history` 查到，只退出預設結果（mark-over-delete） |

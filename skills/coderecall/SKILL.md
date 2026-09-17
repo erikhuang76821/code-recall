@@ -26,7 +26,9 @@ the newer evidence and then correct the ledger.
   warns about.
 - About to reopen a design choice or retry an approach that failed before:
   `coderecall search <terms>` (or MCP `search_memory`) — never read
-  DECISIONS.md/LESSONS.md whole; that re-bills the entire ledger every turn.
+  DECISIONS.md/LESSONS.md whole; that re-bills the entire ledger every turn. A hit
+  carries the reasoning, not just the title; add `--full` (MCP: `detail:"full"`)
+  to read the whole entry.
 
 ## When to write
 

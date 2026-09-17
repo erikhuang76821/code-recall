@@ -52,6 +52,13 @@ const NOW_LOOKS_DONE_RE = /[✓✔]|已(?:經)?(?:合併|完成|推上|推送|�
 const MAX_TRANSCRIPT_LINE = 200;       // cap any transcript-derived line (with a visible […] marker)
 const MAX_AUTHORED_LINE = 4000;        // anti-bloat cap for AUTHORED ADR/lesson lines — silent, NEVER appends a marker
 const SEARCH_LIMIT_DEFAULT = 5;        // coderecall search results shown by default
+// Retrieval budgets (B2). The protocol tells the agent to recall the WHY with
+// `search` instead of reading the ledger whole — so a result must actually carry
+// body text, but bounded, or "search instead of reading the file" stops being true.
+const SEARCH_SNIPPET_LINES = 3;        // body lines shown per hit by default
+const SEARCH_SNIPPET_LINE_CHARS = 150; // per-line cap in the default snippet
+const SEARCH_FULL_ENTRY_CHARS = 1500;  // per-entry cap for `search --full`
+const SEARCH_FULL_TOTAL_CHARS = 6000;  // whole-response cap for `search --full`
 const SESSIONS_KEEP = 50;              // bounded sessions.md timeline entries
 const STALE_REMINDER_MINUTES = 45;     // UserPromptSubmit reminder fires after this; also its throttle window
 const CODEX_AGENTS_WARN_BYTES = 32768; // Codex CLI reads ~32KiB of AGENTS.md; warn beyond
@@ -61,7 +68,7 @@ const DIGEST_DECISIONS_TOPN = 12;      // newest current-decision TITLES listed 
 const DIGEST_LESSONS_TOPN = 8;         // active-lesson TITLES surfaced alongside decisions (same anti-fragmentation rationale: the agent should SEE which pitfalls exist, not just their count). Listed after decisions so decisions win the shared fence budget.
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.11.0';
+const VERSION = '2.12.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -2132,9 +2139,45 @@ function bm25Search(query, chunks, limit) {
   return scored.slice(0, limit);
 }
 
-function cmdSearch(query, limit, includeHistory) {
+/**
+ * The lines of a search hit worth showing — the REASONING, not the bookkeeping.
+ *
+ * B2: a hit's text is the whole entry, which starts `## title`, `- date:`,
+ * `- updated:`, `- status:`, `- confidence:`. Taking the first three lines
+ * therefore returned the title (already printed as the label) plus two dates,
+ * and never the body — while the protocol was telling agents to use `search` to
+ * recover *why* a decision was made. Metadata lines and the title are dropped
+ * here so what is left is what the author actually wrote.
+ */
+function chunkBodyLines(chunk) {
+  const lines = String(chunk.text).split('\n')
+    .filter((l) => !/^## /.test(l))             // the title is the result label
+    .filter((l) => !ENTRY_META_RE.test(l))      // date/status/confidence/code/…
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return lines;
+}
+
+/**
+ * Window the body around the first line that matches the query, so a long entry
+ * shows the part that was hit rather than always its opening sentence.
+ */
+function snippetLines(chunk, query, maxLines) {
+  const body = chunkBodyLines(chunk);
+  if (body.length <= maxLines) return { lines: body, from: 0, total: body.length };
+  const terms = tokenize(query);
+  let start = 0;
+  for (let i = 0; i < body.length; i++) {
+    const lower = body[i].toLowerCase();
+    if (terms.some((t) => t && lower.indexOf(t) !== -1)) { start = i; break; }
+  }
+  if (start + maxLines > body.length) start = Math.max(0, body.length - maxLines);
+  return { lines: body.slice(start, start + maxLines), from: start, total: body.length };
+}
+
+function cmdSearch(query, limit, includeHistory, full) {
   requireLedger();
-  if (!query || !query.trim()) fail('usage: node coderecall.js search <query> [--limit N] [--history] [--history]');
+  if (!query || !query.trim()) fail('usage: coderecall search <query> [--limit N] [--history] [--full]');
   const results = bm25Search(query, collectChunks({ includeHistory: includeHistory }), limit || SEARCH_LIMIT_DEFAULT);
   if (results.length === 0) {
     console.log('No matches for: ' + query + (includeHistory ? '' : '  (current truth only — add --history to include superseded/archived)'));
@@ -2142,14 +2185,33 @@ function cmdSearch(query, limit, includeHistory) {
   }
   console.log('coderecall search: "' + query + '" — ' + results.length + ' result(s)' + (includeHistory ? ' (incl. history)' : ' (current truth)'));
   console.log('');
+  let spent = 0;
+  let clipped = 0;
   for (const r of results) {
     const tag = chunkIsHistory(r.chunk) ? '[' + (r.chunk.status === 'archived' ? 'archived' : r.chunk.status) + '] ' : '';
     const head = tag + r.chunk.source + (r.chunk.label ? '  › ' + r.chunk.label : '');
     console.log(r.score.toFixed(2) + '  ' + head);
-    const snippet = r.chunk.text.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 3);
-    for (const l of snippet) console.log('      ' + (l.length > 150 ? l.slice(0, 150) + ' …' : l));
+    if (full) {
+      // Whole body, bounded per entry AND across the response — "read the entry"
+      // must not quietly become "read the ledger".
+      if (spent >= SEARCH_FULL_TOTAL_CHARS) { clipped++; console.log('      … (response budget reached — narrow the query or use --limit)'); console.log(''); continue; }
+      let body = chunkBodyLines(r.chunk).join('\n');
+      if (body.length > SEARCH_FULL_ENTRY_CHARS) {
+        body = body.slice(0, SEARCH_FULL_ENTRY_CHARS) + '\n… (entry truncated at ' + SEARCH_FULL_ENTRY_CHARS + ' chars — open the file for the rest)';
+      }
+      spent += body.length;
+      for (const l of body.split('\n')) console.log('      ' + l);
+    } else {
+      const s = snippetLines(r.chunk, query, SEARCH_SNIPPET_LINES);
+      if (!s.lines.length) console.log('      (no body text — metadata only)');
+      for (const l of s.lines) console.log('      ' + (l.length > SEARCH_SNIPPET_LINE_CHARS ? l.slice(0, SEARCH_SNIPPET_LINE_CHARS) + ' …' : l));
+      if (s.total > s.lines.length) {
+        console.log('      … +' + (s.total - s.lines.length) + ' more line(s) — `coderecall search "' + query + '" --full` for the whole entry');
+      }
+    }
     console.log('');
   }
+  if (clipped) console.log('(' + clipped + ' result(s) not expanded — response budget ' + SEARCH_FULL_TOTAL_CHARS + ' chars)');
 }
 
 // ---------------------------------------------------------------------------
@@ -3448,6 +3510,52 @@ function cmdSelftest() {
         check('B-P0: update_task reported success only after writing', /"Updated: NOW\./.test(out));
       } finally { rmrf(udir); }
     }
+
+    // --- B2: search returns the REASONING, bounded ---
+    // The protocol tells agents to recover "why" with search instead of reading
+    // the ledger. Before this, a hit's first three lines were the title and two
+    // dates, so the answer never contained the reasoning.
+    {
+      const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-search-'));
+      try {
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: sdir, stdio: 'ignore' });
+        const srun = (a) => cp.execFileSync(process.execPath, [__filename].concat(a), { cwd: sdir, encoding: 'utf8' });
+        srun(['decision', 'Adopt idempotency keys on the payments webhook',
+          '--context', 'retries double-charged customers during the March incident',
+          '--decision', 'SETNX with a 24h TTL keyed on the provider event id',
+          '--consequences', 'needs a production Redis credential in CI',
+          '--confidence', 'high']);
+        const snip = srun(['search', 'idempotency']);
+        check('B2: default search shows body text, not just metadata',
+          /SETNX with a 24h TTL/.test(snip) || /retries double-charged/.test(snip));
+        check('B2: default search no longer wastes the snippet on date lines',
+          !/^\s+- date:/m.test(snip) && !/^\s+- updated:/m.test(snip));
+        check('B2: default search points at --full when the body is longer',
+          /more line\(s\)/.test(snip) || /Consequences/.test(snip));
+        const fullOut = srun(['search', 'idempotency', '--full']);
+        check('B2: --full returns the whole entry body',
+          /retries double-charged/.test(fullOut) && /needs a production Redis credential/.test(fullOut));
+        // Windowing: a match late in a long body is what gets shown.
+        srun(['decision', 'Long rationale entry for windowing',
+          '--body', ['alpha one', 'beta two', 'gamma three', 'delta four', 'epsilon WINDOWMARK five'].join('\n')]);
+        const win = srun(['search', 'WINDOWMARK']);
+        check('B2: the snippet windows around the matching line', /WINDOWMARK/.test(win));
+        // Budgets hold.
+        const bigBody = [];
+        for (let i = 0; i < 60; i++) bigBody.push('padding line ' + i + ' ' + 'x'.repeat(80) + ' BUDGETPROBE');
+        srun(['decision', 'Oversized entry for the retrieval budget', '--body', bigBody.join('\n')]);
+        const capped = srun(['search', 'BUDGETPROBE', '--full', '--limit', '1']);
+        check('B2: --full caps a single oversized entry', /entry truncated at \d+ chars/.test(capped));
+        // MCP parity.
+        const mcpS = (a) => cp.execFileSync(process.execPath, [__filename, 'mcp'],
+          { cwd: sdir, encoding: 'utf8', input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'search_memory', arguments: a } }) + '\n' });
+        const mSnip = JSON.parse(mcpS({ query: 'idempotency', limit: 1 }).trim().split('\n')[0]).result.content[0].text;
+        check('B2: MCP search_memory returns body text too', /SETNX with a 24h TTL|retries double-charged/.test(mSnip));
+        const mFull = JSON.parse(mcpS({ query: 'idempotency', limit: 1, detail: 'full' }).trim().split('\n')[0]).result.content[0].text;
+        check('B2: MCP detail:"full" returns the whole entry',
+          /retries double-charged/.test(mFull) && /needs a production Redis credential/.test(mFull));
+      } finally { rmrf(sdir); }
+    }
   } catch (e) {
     check('selftest ran without throwing', false);
     console.log('  selftest error: ' + (e && e.message ? e.message : String(e)));
@@ -3708,8 +3816,8 @@ function mcpToolDefs() {
       inputSchema: { type: 'object', properties: { title: { type: 'string', description: 'title substring of the lesson to retire' }, status: { type: 'string', enum: ['resolved', 'obsolete'], description: 'default resolved' }, note: { type: 'string', description: 'optional one-line note on how/why it was resolved' } }, required: ['title'], additionalProperties: false } },
     { name: 'reconfirm', description: 'Re-stamp an entry as still-true today without rewriting it: refreshes `updated:` (so recency ranking and the staleness flag treat it as fresh) and can re-raise `confidence`. Use when you verified an older decision/lesson still holds. Matches the first active entry whose title contains `title`.',
       inputSchema: { type: 'object', properties: { title: { type: 'string' }, file: { type: 'string', enum: ['decisions', 'lessons'], description: 'default decisions' }, confidence: conf }, required: ['title'], additionalProperties: false } },
-    { name: 'search_memory', description: 'BM25 lexical search, lifecycle-aware: returns CURRENT truth by default (superseded/deprecated/resolved/obsolete/archived excluded). Set `history:true` to include them.',
-      inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer' }, history: { type: 'boolean' } }, required: ['query'], additionalProperties: false } },
+    { name: 'search_memory', description: 'Before reopening a settled design choice or retrying an approach that failed before, search decisions and lessons by topic, code path, or alias. Returns the REASONING (body text), not just titles. Lifecycle-aware: CURRENT truth only by default (superseded/deprecated/resolved/obsolete/archived excluded); set `history:true` to include them. Use `detail:"full"` with a small `limit` to read matching entries in full instead of a short snippet.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'integer' }, history: { type: 'boolean' }, detail: { type: 'string', enum: ['snippet', 'full'], description: 'snippet (default) = a few body lines around the match; full = the whole entry body, capped per entry and per response' } }, required: ['query'], additionalProperties: false } },
     { name: 'list_decisions', description: 'List CURRENT (accepted) decisions — the HEAD view. Set `all:true` to include superseded/deprecated.',
       inputSchema: { type: 'object', properties: { all: { type: 'boolean' } }, additionalProperties: false } },
   ];
@@ -3797,10 +3905,33 @@ function mcpCallTool(name, args) {
     }
     case 'search_memory': {
       if (!args.query) throw new Error('query is required');
-      const results = bm25Search(String(args.query), collectChunks({ includeHistory: !!args.history }), args.limit > 0 ? args.limit : SEARCH_LIMIT_DEFAULT);
-      if (!results.length) return 'No matches for: ' + args.query + (args.history ? '' : ' (current truth only; set history:true to include superseded/archived)');
-      return results.map((r) => (chunkIsHistory(r.chunk) ? '[' + (r.chunk.status === 'archived' ? 'archived' : r.chunk.status) + '] ' : '') + r.score.toFixed(2) + '  ' + r.chunk.source + (r.chunk.label ? ' > ' + r.chunk.label : '') +
-        '\n    ' + r.chunk.text.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 2).join(' / ')).join('\n');
+      const q = String(args.query);
+      const results = bm25Search(q, collectChunks({ includeHistory: !!args.history }), args.limit > 0 ? args.limit : SEARCH_LIMIT_DEFAULT);
+      if (!results.length) return 'No matches for: ' + q + (args.history ? '' : ' (current truth only; set history:true to include superseded/archived)');
+      // B2: return the REASONING. This used to emit the first two lines of the
+      // raw entry — which are `- date:` and `- updated:` — so an agent told by
+      // the protocol to "search for the why" got two dates and had to read the
+      // whole file anyway, the exact thing the protocol exists to prevent.
+      const full = args.detail === 'full';
+      let spent = 0;
+      const out = [];
+      for (const r of results) {
+        const tag = chunkIsHistory(r.chunk) ? '[' + (r.chunk.status === 'archived' ? 'archived' : r.chunk.status) + '] ' : '';
+        const head = tag + r.score.toFixed(2) + '  ' + r.chunk.source + (r.chunk.label ? ' > ' + r.chunk.label : '');
+        if (full) {
+          if (spent >= SEARCH_FULL_TOTAL_CHARS) { out.push(head + '\n    … (response budget reached; narrow the query or lower limit)'); continue; }
+          let body = chunkBodyLines(r.chunk).join('\n');
+          if (body.length > SEARCH_FULL_ENTRY_CHARS) body = body.slice(0, SEARCH_FULL_ENTRY_CHARS) + '\n… (entry truncated at ' + SEARCH_FULL_ENTRY_CHARS + ' chars)';
+          spent += body.length;
+          out.push(head + '\n' + body.split('\n').map((l) => '    ' + l).join('\n'));
+        } else {
+          const s = snippetLines(r.chunk, q, SEARCH_SNIPPET_LINES);
+          const shown = s.lines.map((l) => '    ' + (l.length > SEARCH_SNIPPET_LINE_CHARS ? l.slice(0, SEARCH_SNIPPET_LINE_CHARS) + ' …' : l)).join('\n');
+          const more = s.total > s.lines.length ? '\n    … +' + (s.total - s.lines.length) + ' more line(s); call again with detail:"full" for this entry' : '';
+          out.push(head + '\n' + (shown || '    (no body text — metadata only)') + more);
+        }
+      }
+      return out.join('\n');
     }
     case 'list_decisions': {
       const entries = parseEntries(readFileSafe(DECISIONS_FILE) || '').entries
@@ -3885,7 +4016,7 @@ function cmdMcp() {
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
-  const usage = 'usage: node coderecall.js <init|sync [--all]|status|check [--strict]|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|affected [--staged] [--base <ref>] [--json]|decision "<title>" [--context/--decision/--consequences/--status/--confidence/--code]|resolve-lesson "<title>" [--status resolved|obsolete] [--note ..]|reconfirm "<title>" [--file decisions|lessons] [--confidence ..]|mcp|score [--json]|selftest|version>';
+  const usage = 'usage: node coderecall.js <init|sync [--all]|status|check [--strict]|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history] [--full]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|affected [--staged] [--base <ref>] [--json]|decision "<title>" [--context/--decision/--consequences/--status/--confidence/--code]|resolve-lesson "<title>" [--status resolved|obsolete] [--note ..]|reconfirm "<title>" [--file decisions|lessons] [--confidence ..]|mcp|score [--json]|selftest|version>';
   switch (cmd) {
     case 'init': return cmdInit();
     case 'sync': return cmdSync(args.includes('--all'));
@@ -3917,6 +4048,7 @@ function main() {
     case 'search': {
       let limit = SEARCH_LIMIT_DEFAULT;
       let history = false;
+      let full = false;
       const terms = [];
       for (let i = 1; i < args.length; i++) {
         if (args[i] === '--limit') {
@@ -3926,9 +4058,10 @@ function main() {
           continue;
         }
         if (args[i] === '--history' || args[i] === '--all') { history = true; continue; }
+        if (args[i] === '--full') { full = true; continue; }
         terms.push(args[i]);
       }
-      return cmdSearch(terms.join(' '), limit, history);
+      return cmdSearch(terms.join(' '), limit, history, full);
     }
     case 'deinit': return cmdDeinit(args.includes('--yes'));
     case undefined:
