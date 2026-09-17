@@ -211,7 +211,7 @@ node /path/to/code-recall/coderecall.js <command>
 | `doctor [--selftest]` | Health check (hooks/ledger/paths/lint/Codex 32KiB); `--selftest` also runs the regression test |
 | `score [--json]` | Rate working-state health (GOAL clarity / NEXT actionability / blockers reasoned / freshness) |
 | `decision "<title>" [--context/--decision/--consequences/--status/--confidence] [--supersedes "<old title/substr>"] [--code "<path → symbol>"]` | Record an ADR decision in one line; `--supersedes` explicitly retires a prior decision (independent of title similarity); `--code` back-links the file/symbol it governs (`doctor` flags it if the path disappears); `--aliases "<synonyms/old names>"` adds extra search terms so lexical search finds it by words not in the title/body; `--confirm-new` acknowledges a flagged near-duplicate title as a genuinely distinct decision |
-| `search <query> [--limit N] [--history]` | Lexical search — **current truth only by default** (superseded/deprecated/resolved/obsolete/archive excluded); `--history` includes them (labeled `[superseded]` / `[resolved]`) |
+| `search <query> [--limit N] [--history] [--full]` | Lexical search that returns the **reasoning**, not just titles — **current truth only by default** (superseded/deprecated/resolved/obsolete/archive excluded); `--history` includes them (labeled `[superseded]` / `[resolved]`); `--full` prints whole entries (capped) |
 | `decisions [--all]` | **HEAD view:** list current accepted decisions (`--all` includes superseded/deprecated) |
 | `affected [--staged] [--base <ref>] [--json]` | List current decisions/lessons whose `code:` back-link covers your changed files (advisory; file-level, **not** semantic conflict detection) — surfaces what to re-check before you contradict it. Reports coverage so a clean result isn't mistaken for proof |
 | `resolve-lesson "<title>" [--status resolved\|obsolete] [--note ".."]` | Retire a lesson whose root cause is fixed (`resolved`) or whose premise is gone (`obsolete`) — kept & searchable via `--history`, just dropped from default results (mark-over-delete) |
@@ -336,10 +336,13 @@ Rule of thumb: the digest is the **map** (what exists), `search` loads the **ter
 ### 🔎 Search memory
 
 ```sh
-coderecall search "idempotency key"     # 5 by default
+coderecall search "idempotency key"          # 5 hits, a few body lines each
 coderecall search redis retry --limit 3
+coderecall search "idempotency key" --full   # whole entries, capped
 ```
-Zero-dep BM25 lexical search across the ledger + `archive/`, paragraph/entry-level results with score and source.
+Zero-dep BM25 across the ledger + `archive/`, scored and sourced.
+
+**A hit shows you the reasoning.** The snippet skips the title and the metadata lines and windows around the line that matched, so the answer to *why did we do it this way* is in the result — not two dates and a filename. `--full` prints whole entries, bounded per entry and per response so "search instead of reading the ledger" stays true.
 
 ### 📊 Working-state score
 

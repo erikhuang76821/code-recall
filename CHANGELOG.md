@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.12.0 (2026-09-17)
+
+**`search` returns the reasoning it always promised.** The protocol tells every agent to recall *why* a decision was made with `coderecall search` instead of reading the ledger whole. It could not: a hit's text starts `## title`, `- date:`, `- updated:`, and the renderer showed the first three lines — so the answer was a title (already printed as the label) and two dates, and the agent had to open the file the protocol told it not to open. The MCP tool showed two lines, which was worse.
+
+- **Snippets are body text.** The title and every coderecall metadata line are skipped, and the window starts at the first body line that matches the query, so a long entry shows the part that was hit rather than its opening sentence.
+- **`--full` / MCP `detail:"full"`** prints whole entries, bounded at 1500 chars per entry and 6000 per response, with an explicit marker when either bound clips — "search instead of reading the ledger" has to stay true, so retrieval is capped, not unbounded.
+- **When a snippet is not the whole story it says so**, and names the flag that gets the rest.
+- `search_memory`'s tool description now says *when* to call it (before reopening a settled choice or retrying a failed approach), not just what it does.
+- `selftest` 124 → 132.
+
 ## v2.11.0 (2026-09-17)
 
 **B-P0 — ledger integrity. The tool could silently destroy the decisions it exists to preserve; this release stops that, and nothing else.** Scope was fixed by a three-way design review (Claude Fable 5.1 × Codex gpt-6-astra × Agy, two rounds, 9 of 11 goals converged with no dissent) whose unanimous first action was "stop the bleeding before adding new injection channels". Every defect below was reproduced on v2.10.0 first and now has a regression test: `selftest` 93 → 124.
