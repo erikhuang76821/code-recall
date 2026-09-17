@@ -206,7 +206,7 @@ node /path/to/code-recall/coderecall.js <command>
 | Command | What it does |
 |---|---|
 | `init` | Create `.ai/memory/` + AGENTS.md protocol section + CLAUDE.md stub |
-| `sync [--all]` | Refresh AGENTS.md; `--all` also writes per-tool stubs + Gemini/Cursor native config |
+| `sync [--all|--codex [--user]]` | Refresh AGENTS.md; `--all` also writes per-tool stubs + Gemini/Cursor native config; `--codex` registers the SessionStart hook with Codex CLI |
 | `status` | Show GOAL/NOW/NEXT, checklist, file sizes, drift, freshness |
 | `doctor [--selftest]` | Health check (hooks/ledger/paths/lint/Codex 32KiB); `--selftest` also runs the regression test |
 | `score [--json]` | Rate working-state health (GOAL clarity / NEXT actionability / blockers reasoned / freshness) |
@@ -371,6 +371,24 @@ Two more lifecycle moves, both **mark-over-delete** (an entry is never destroyed
 - **Navigable back-links:** an optional `- code: <path → symbol>` ties a decision/lesson to the file it's about; `doctor` flags it when that path disappears (the entry may be stale). URLs and bare symbols are skipped.
 
 > **What to record (recoverability test):** before writing, ask *could a competent engineer reconstruct this from the code as it stands?* If yes, don't record it — the ledger is for what code can't show (the why, the dead ends, the pitfalls), never for what reading the code would reveal.
+
+### 🤖 Optional: auto-injection on Codex CLI
+
+```sh
+coderecall sync --codex          # this project  (.codex/hooks.json)
+coderecall sync --codex --user   # every project (~/.codex/hooks.json)
+```
+
+Registers a `SessionStart` hook (matcher `startup|resume|clear|compact`), so Codex gets the same automatic re-anchor Claude Code gets. Verified end to end: a live `codex exec` with the generated config injected the ledger and gpt-6-astra quoted the `GOAL:` line back.
+
+**Two things must be true, or the hook does nothing and says nothing:**
+
+1. **Trust the hook** — start Codex, run `/hooks`, review and trust the coderecall entry. Codex re-asks after any change to the command.
+2. **Trust the project** (project-level only) — an untrusted project does not load `.codex/hooks.json` at all, and `--dangerously-bypass-hook-trust` does *not* cover this.
+
+`coderecall doctor` has a `[codex]` section that reports both, plus whether the command form is one Codex will actually run and whether `node` resolves on PATH.
+
+> **Not registered on purpose:** `PreCompact` and `Stop`. `precompact.js` parses Claude Code's transcript format, so under Codex it would write an *empty* snapshot and look like it worked; `Stop` is unverified there. A hook that silently does nothing is worse than no hook. See [COMPATIBILITY.md](COMPATIBILITY.md).
 
 ### 🔌 Optional: MCP server (write-back as tool calls)
 

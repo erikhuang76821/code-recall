@@ -72,3 +72,14 @@ consolidate 用 titleOverlap>0.8 判定「重複」並刪掉其中一篇(不歸�
 - code: coderecall.js → buildDigest
 - aliases: protocol wording drift digest AGENTS SKILL 協定 措辭 不一致
 v2.11.0 把 AGENTS-section.md 與 SKILL.md 的規則 2 改成「狀態改變時才寫,不是每次編輯」,卻沒改 buildDigest 裡的同一句,digest 仍說 after each significant step。根因:同一條協定存在三個副本(模板/skill/digest 字串),只有前兩個是檔案、容易一起 grep 到,digest 那份是程式碼裡的字串。而 digest 是唯一每個工具都會收到的表面,不載入 AGENTS.md 的工具只看得到它,所以漏改的那份反而優先級最高。做法:改協定措辭時三處一起改,並以 grep 協定關鍵句作為檢查。
+
+## Codex Windows hook:commandWindows 以引號路徑開頭會靜默不執行;專案級 hooks 還需專案受信任
+- date: 2026-09-17
+- updated: 2026-09-17
+- status: accepted
+- confidence: high
+- code: coderecall.js → syncCodexHooks
+- aliases: codex hooks commandWindows windows quoting project trust silent no-op 靜默 失效
+Codex 0.154 (Windows) 的 hook,若 commandWindows 以「含空白的引號絕對路徑」開頭(例:"C:Program Files
+odejs
+ode.exe" "...sessionstart.js"),hook 不會執行,且 Codex 不報錯、模型也只是拿不到 context — 與「沒設定 hook」外觀完全相同。以二分法實測隔離:同一支 sessionstart.js,command 用正斜線或反斜線都可,加 additionalContextLimit/statusMessage 也可,唯獨把 commandWindows 換成引號開頭的絕對 node 路徑就失敗。注意 cmd.exe 直接執行同一字串是成功的,所以這不是單純的 cmd 去引號規則,而是 Codex 自身 spawn 路徑的行為。另一個獨立前提:專案級 <repo>/.codex/hooks.json 在「未受信任的專案」完全不載入,--dangerously-bypass-hook-trust 只繞過 hook 信任、不繞過專案信任;同樣是靜默無效。做法:產生 hook 設定時不要讓 commandWindows 以引號開頭;任何自動產生的 hook 都要有端到端探針驗證(寫檔 + 讓模型回報 codeword),不能只看設定檔長得對。

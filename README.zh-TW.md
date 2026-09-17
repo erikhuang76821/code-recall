@@ -362,6 +362,24 @@ DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈。**取�
 
 > **該記什麼（可恢復性測試）：** 下筆前先問——*一個夠格的工程師能不能單看現有 code 重建這條資訊？* 能的話就別記——帳本是給 code 顯示不出來的東西（為什麼、死路、坑），絕不是給讀 code 就能還原的內容。
 
+### 🤖 選配:Codex CLI 自動注入
+
+```sh
+coderecall sync --codex          # 只這個專案  (.codex/hooks.json)
+coderecall sync --codex --user   # 所有專案    (~/.codex/hooks.json)
+```
+
+註冊一個 `SessionStart` hook(matcher `startup|resume|clear|compact`),讓 Codex 也有和 Claude Code 一樣的自動重錨定。已端到端實測:用產生出來的設定跑真實 `codex exec`,gpt-6-astra 逐字回覆了注入的 `GOAL:` 行。
+
+**有兩個前提沒滿足的話,hook 不會動、而且不會有任何錯誤訊息:**
+
+1. **信任 hook** — 啟動 Codex,執行 `/hooks`,審閱並信任 coderecall 那筆。命令只要改過,Codex 會再問一次。
+2. **信任專案**(只有專案級需要)— 未受信任的專案根本不會載入 `.codex/hooks.json`,而且 `--dangerously-bypass-hook-trust` **不**涵蓋這一項。
+
+`coderecall doctor` 有一段 `[codex]` 會回報這兩項,另外也檢查命令形式是不是 Codex 真的會執行的那種、以及 `node` 在不在 PATH 上。
+
+> **刻意不註冊**:`PreCompact` 與 `Stop`。`precompact.js` 解析的是 Claude Code 的 transcript 格式,在 Codex 上會寫出**空的**快照卻看起來像成功;`Stop` 在 Codex 上未驗證。一個靜默什麼都不做的 hook,比沒有 hook 更糟。見 [COMPATIBILITY.md](COMPATIBILITY.md)。
+
 ### 🔌 選配：MCP server（讓寫回變成工具呼叫）
 
 ```jsonc
