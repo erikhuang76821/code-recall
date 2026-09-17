@@ -36,10 +36,13 @@ Blocked: - [!] backfill blocked — need prod Redis credentials from ops
 Current decisions (2, newest first — read before proposing changes):
 - Process webhooks async, ack immediately
 - Use Redis SETNX for webhook idempotency
+
+Active lessons (1 — do not retry these):
+- Do not retry the webhook inside the handler
 <<<CODE-RECALL:UNTRUSTED-LEDGER-DATA:END>>>
 ```
 
-agent 重錨定到當前的 `NOW` **連同它的理由**(為什麼 24h TTL),看到 blocker *和它的原因*,也看到兩條已在生效的決策——而不是重新推導或反過來牴觸它們。這是**真實 hook** 的輸出;一個 [CI 回歸測試](#-自我驗證-selftest--ci)在 Linux + Windows 上實際驅動真 hook、釘住這個重錨定**行為**(測試用的是它自己的 fixture,不是這份展示用的 ledger)。
+agent 重錨定到當前的 `NOW` **連同它的理由**(為什麼 24h TTL),看到 blocker *和它的原因*,也看到已在生效的決策與已知死路——而不是重新推導或反過來牴觸它們。這是**真實 hook** 的輸出;一個 [CI 回歸測試](#-自我驗證-selftest--ci)在 Linux + Windows 上實際驅動真 hook、釘住這個重錨定**行為**(測試用的是它自己的 fixture,不是這份展示用的 ledger)。
 
 <details>
 <summary>產生它的整份 ledger(三個小檔)</summary>
@@ -114,6 +117,7 @@ Code Recall 採「減法哲學」：把記憶濃縮成幾個靜態 Markdown 檔�
 - **⚡ Token 紀律：** 每次只注入一份精簡、有預算上限的摘要——digest 的 fence 內容有硬上限（~1.2 KB、數百 token），整個帳本**不會**被塞進 context；非 Code Recall 專案零成本。
 - **🔎 可搜尋：** 零依賴 BM25 詞法搜尋（中英皆可），補上跨月召回。
 - **🧹 防陳舊：** 時序/取代/過期模型 + `doctor` lint + 選配 git pre-commit 閘門，讓「陳舊帳本誤導」風險最小化。
+- **🔒 不會在你背後改你的條目(v2.11.0)：** 條目不會被自動合併、刪除或降級。要退役某筆決策必須指名它(`--supersedes`)；`consolidate` 會先備份帳本、把內容寫進 `archive/` **之後**才從活檔移除，遇到近似標題只會回報、不會替你挑一筆留下。寫入失敗一定會說，絕不回報成功。([修了什麼](CHANGELOG.md))
 - **🚨 出錯大聲，不靜默失敗：** 容錯的 `TASK.md` 解析 + digest/`doctor` 警告，會在 agent 重錨定**之前**就把格式錯亂或 append 漂移的帳本攤開——漏冒號的 `NOW`、多行 `NOW`（只 append 不 rewrite）、或內容其實已完成的 `NOW`——而不是靜默送出空的/誤導的錨點。`GOAL`/`NOW`/`NEXT` 只在標頭區解析，檔案深處的散文行無法劫持現行狀態錨點。寫入的 ADR 欄位也絕不被靜默截斷；帳本鎖帶 ownership token，長時間寫入不會被誤判 stale 而把鎖刪到別人手裡（無並行寫入毀損）。
 
 > **它做不到的事(誠實邊界)** · 帳本只跟它被維護的程度一樣可靠。一旦停止更新,它就變成**看起來很權威的過期錯誤**——緩解靠的是偵測(`doctor` lint、stale flag、出錯大聲),不是預防。而且它**無法判斷 code 已經背叛某個決策**——那需要語意理解(LLM/向量),超出零依賴範圍;Code Recall 把*現行*決策推到 agent 眼前 + 寫入時示警,最大化「被看到」的機率,但不做矛盾偵測。全自動注入也只在 Claude Code 保證(見上)。
@@ -183,7 +187,7 @@ sh "$(npm root -g)/@erikhuang/coderecall/install.sh"
 
 之後不需手動操作 — Hooks 在每次 session 開始 / 壓縮後自動注入任務摘要，agent 依協定改寫帳本。
 
-**其他工具（Cursor / Copilot / Windsurf / Cline / Roo / Gemini / Codex）：** 執行 `node coderecall.js sync --all` 產生各工具的指示 stub 與原生設定，協定文字本身就是它們的 Hook。
+**其他工具（Cursor / Copilot / Windsurf / Cline / Roo / Gemini / Codex）：** 執行 `coderecall sync --all` 產生各工具的指示 stub 與原生設定，協定文字本身就是它們的 Hook。
 
 ---
 
@@ -262,12 +266,12 @@ Code Recall 監聽 AI 工具的生命週期 (Lifecycle Hooks)，自動存取記�
 | Agent | 支援方式 |
 |---|---|
 | ✅ Claude Code | 原生 Hooks（SessionStart / PreCompact / Stop）— 注入、快照、重錨定全自動 |
+| ✅ Codex CLI | 目前走 AGENTS.md（`doctor` 會警告超過 ~32KiB 讀取上限）。Codex 0.154 已有 hooks,且 coderecall 的 `sessionstart.js` **原樣實測可把 digest 注入 gpt-6-astra** — 正式 adapter 是下一步;手動設定見 [COMPATIBILITY.md](COMPATIBILITY.md) |
 | ✅ Cursor | `.cursor/rules` 指令型 Hook + `.cursor/hooks.json` Stop 心跳（`sync --all`） |
-| ✅ GitHub Copilot | `.github/copilot-instructions.md` 指令型 Hook |
-| ✅ Windsurf | `.windsurf/rules`（`trigger: always_on`） |
+| ✅ GitHub Copilot | CLI / cloud / VS Code 皆原生讀 AGENTS.md,另加 `.github/copilot-instructions.md` 區段 |
+| ✅ Gemini CLI | `.gemini/settings.json` → `context.fileName` 載入 AGENTS.md(**v2.11.0 修好** — 舊版寫的鍵 Gemini 根本不讀,等於從未載入) |
+| ✅ Devin Desktop(原 Windsurf) | 原生讀 AGENTS.md;`.windsurf/rules` 仍可用,但已是 legacy fallback |
 | ✅ Cline / Roo | `.clinerules` / `.roo/rules` 指令型 Hook |
-| ✅ Gemini CLI | `.gemini/settings.json` 原生載入 AGENTS.md |
-| ✅ Codex CLI | AGENTS.md（`doctor` 會警告超過 ~32KiB 讀取上限） |
 | ✅ 任何 MCP client | `coderecall mcp` — Claude Desktop / Cursor / VS Code… 可直接呼叫記憶工具 |
 
 逐工具的「注入 / 寫回 / compaction 存活」三層真實等級，見 [COMPATIBILITY.md](COMPATIBILITY.md)。
@@ -325,16 +329,16 @@ ADR 工具有狀態生命週期，但靠人手寫、不會浮現給 agent、也�
 ### 🔎 搜尋記憶
 
 ```sh
-node coderecall.js search "idempotency key"     # 預設 5 筆
-node coderecall.js search redis 重試 --limit 3   # 中英混合
+coderecall search "idempotency key"     # 預設 5 筆
+coderecall search redis 重試 --limit 3   # 中英混合
 ```
 跨帳本 + `archive/` 的零依賴 BM25 詞法搜尋，段落／條目級結果附分數與來源。
 
 ### 📊 工作狀態評分 (score)
 
 ```sh
-node coderecall.js score          # 人類可讀
-node coderecall.js score --json   # 給 CI / agent 消費
+coderecall score          # 人類可讀
+coderecall score --json   # 給 CI / agent 消費
 ```
 
 回答「這份帳本**真的**能讓 agent 接手嗎？」——不是看欄位有沒有填，而是**機器檢查可執行性**：GOAL 是否具體、NEXT 是否是一個明確的下一步（"continue" / "TBD" 這種模糊值會被扣分）、每個 `[!]` blocker 有沒有寫理由、帳本是否新鮮。每個維度都附**為什麼**與**先修哪個**。刻意是透明啟發式、不是假精準的 ML 分數——目的是抓出「看起來填好了、其實驅動不了下一步」的假完整。`status` 也會帶一行總分。
@@ -342,7 +346,7 @@ node coderecall.js score --json   # 給 CI / agent 消費
 ### ✅ 自我驗證 (selftest / CI)
 
 ```sh
-node coderecall.js selftest        # 或 doctor --selftest / npm test
+coderecall selftest        # 或 doctor --selftest / npm test
 ```
 在臨時專案模擬 compaction，並**驅動真正的 hook 腳本**（sessionstart / precompact），斷言重錨定 digest 含全量 TASK body 與快照生成。GitHub Actions 在 **Linux + Windows × Node 18/20** 每次 push/PR 跑它——把核心宣稱變成可重現的回歸測試。
 
@@ -362,13 +366,13 @@ DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈。**取�
 
 ```jsonc
 // Claude Desktop / Cursor / 任何 MCP client
-{ "mcpServers": { "coderecall": { "command": "node", "args": ["<path>/code-recall/coderecall.js", "mcp"] } } }
+{ "mcpServers": { "coderecall": { "command": "coderecall", "args": ["mcp"] } } }
 ```
 ```toml
 # Codex（CLI / Desktop / IDE 共用同一份設定）— ~/.codex/config.toml
 [mcp_servers.coderecall]
-command = "node"
-args = ['<path>/code-recall/coderecall.js', "mcp"]
+command = "coderecall"
+args = ["mcp"]
 ```
 > **一次全域註冊、服務多專案 — 這段請讀。** server 是在**啟動當下、依 launch cwd** 解析 `.ai/memory/`，之後不再變。所以單一全域註冊只有在你的 client **每個專案各自 spawn** 時才正確。已於 2026-08-14 在 Codex CLI 以 `codex -C <專案>` 啟動的情況下驗證：兩個並行 session 產生兩個獨立的 server process，各自讀到自己專案的 ledger。**未**驗證：不重啟就切換專案資料夾的 client —— 那可能讓 server 靜默地一直綁在第一個專案上。不確定時就呼叫 `read_memory`（唯讀），確認回傳的 `GOAL:` 是你以為的那個專案。
 
@@ -379,10 +383,10 @@ args = ['<path>/code-recall/coderecall.js', "mcp"]
 長期記憶最危險的不是**忘記**，而是**錯誤地記住**——過時/被取代的決策仍被反覆召回，污染 context（influence rot）。Code Recall 把決策當 **Git 而非向量庫**：重點是「**哪個是 HEAD（現行）**」而非「哪個最像」。
 
 - **現行/歷史分離**：`search` 與 MCP `search_memory` **預設只回現行決策**；superseded/deprecated/archive 不出現。要看歷史才加 `--history`（明確標 `[superseded]`）。`decisions` 給你 HEAD 視圖。
-- **顯式取代**：`decision "新決定" --supersedes "舊關鍵字"` 直接讓舊決策失去影響力——不靠標題相似度。
+- **顯式取代**：`decision "新決定" --supersedes "舊關鍵字"` 是**唯一**會讓舊條目退役的途徑;關鍵字必須剛好命中一筆 active 條目,命中 0 筆或多筆會中止寫入,不會留下兩筆互相矛盾的生效決策。
 - **加權排序**：召回分數 = `BM25 × 狀態權重(accepted/active 1.0 / proposed 0.5 / deprecated 0.2 / resolved 0.1 / superseded·obsolete 0.05) × confidence × recency`。同樣命中時，**現行、高信心、近期**的決策一定排前面。
 - **主動浮現（常駐索引·抗斷片）**：每次 session / compaction 後，digest 列出**現行決策標題與 active 教訓標題**（newest-first），每個表頭**永遠帶總數**＋取得其餘的路徑（`decisions` 列全部、`search` 拉內文）。agent 因此看得到*哪些*決策與坑存在——不會靜默漏掉一條而重決／重踩——內文維持按需載入（**地圖**常駐、**疆域**按需）。受各區標題上限＋fence 預算封頂。**誠實 scope**：常駐的是*存在性地圖*（標題＋總數＋存取路徑），**不是內文**；且檢索是詞法的，只靠同義詞才找得到的條目仍可能漏。在條目加 `- aliases: <同義詞／舊名>` 即可零依賴補上這個洞。
-- **防再 litigate**：記新決策時若與某條 accepted 決策明顯重疊但未到自動取代門檻，提示三條解法：`--supersedes "X"`、`--confirm-new`、或改寫標題。
+- **防再 litigate**：記新決策時若標題與某條生效決策相似,會印出相似的是哪一筆並讓**兩筆都保持生效**,給三條解法:`--supersedes "X"`、`--confirm-new`、或改寫標題。工具不替你選——相似度是詞面的,分不出「換句話說」和「完全相反」。
 
 > 設計哲學：LLM 缺的不是 storage，是 **attention**——問題不是能存幾條，而是「這個任務該被看到的是哪幾條」。
 >
@@ -393,7 +397,7 @@ args = ['<path>/code-recall/coderecall.js', "mcp"]
 決策日誌只有在「真的被記下來」時才有價值。Code Recall 用兩個**非脅迫**的槓桿降低漏記：
 
 ```sh
-node coderecall.js decision "Adopt hexagonal architecture" \
+coderecall decision "Adopt hexagonal architecture" \
   --context "billing 邏輯與 HTTP 糾纏" --decision "ports/adapters" --consequences "更多樣板但好測"
 ```
 
@@ -404,17 +408,17 @@ node coderecall.js decision "Adopt hexagonal architecture" \
 ### 🪝 選配：Git pre-commit 閘門（讓程式碼維護派生狀態）
 
 ```sh
-node coderecall.js install-githook            # 勸告模式：lint 出錯只警告，commit 照過
-node coderecall.js install-githook --strict   # 嚴格模式：格式錯誤直接擋下 commit
-node coderecall.js remove-githook
+coderecall install-githook            # 勸告模式：lint 出錯只警告，commit 照過
+coderecall install-githook --strict   # 嚴格模式：格式錯誤直接擋下 commit
+coderecall remove-githook
 ```
 commit 時自動以 `TASK.md` 重生 AGENTS.md 摘要 + lint 帳本，並 re-stage 已追蹤的 AGENTS.md/CLAUDE.md。跨平台（node 產生 sh hook）、marker 合併不覆蓋既有 hook、`deinit` 會一併移除。需繞過一次：`git commit --no-verify`。
 
 ### 🎓 選配（實驗性，非核心）：知識畢業 + 跨專案教訓
 
 ```sh
-node coderecall.js graduate            # >90 天、confidence high 匯出成 docs/adr/NNNN-*.md（ADR 檔）
-node coderecall.js graduate --global   # 另寫進 ~/.coderecall/GLOBAL-LESSONS.md（跨專案）
+coderecall graduate            # >90 天、confidence high 匯出成 docs/adr/NNNN-*.md（ADR 檔）
+coderecall graduate --global   # 另寫進 ~/.coderecall/GLOBAL-LESSONS.md（跨專案）
 ```
 非破壞性（條目留在帳本標 `graduated:`，只匯出一次）。決策會輸出成慣例的編號 ADR 檔，可被 adr-tools/log4brains 消費。digest 注入跨專案教訓（限 top-3）：開 `CODE_RECALL_GLOBAL_LESSONS=1`；全域目錄可用 `CODE_RECALL_GLOBAL_DIR` 改位置。
 
@@ -425,7 +429,7 @@ node coderecall.js graduate --global   # 另寫進 ~/.coderecall/GLOBAL-LESSONS.
 ### 🧹 記憶瘦身 + 🤝 團隊協作
 
 ```sh
-node coderecall.js consolidate   # 備份、歸檔完成項目、把過期條目退役到 archive/
+coderecall consolidate   # 備份、歸檔完成項目、把過期條目退役到 archive/
 ```
 記憶都是純文字 Markdown，直接把 `.ai/memory/` 提交進 Git，團隊成員與 CI/CD 即可共用同一份 AI 上下文。
 
@@ -433,17 +437,17 @@ node coderecall.js consolidate   # 備份、歸檔完成項目、把過期條目
 
 ## ❓ 疑難排解 (Troubleshooting)
 
-**Hooks 沒觸發** — 跑 `node coderecall.js doctor`；確認 `~/.claude/settings.json` 的 hook 是絕對路徑且檔案存在（搬 repo 後重跑安裝腳本）；重啟 Claude Code session。
+**Hooks 沒觸發** — 跑 `coderecall doctor`；確認 `~/.claude/settings.json` 的 hook 是絕對路徑且檔案存在（搬 repo 後重跑安裝腳本）；重啟 Claude Code session。
 
 **安裝程式說 JSON 解析失敗** — 刻意的安全機制：settings.json 損壞時絕不覆寫。修好 JSON（找 `settings.json.coderecall.bak.*` 備份）再重跑。
 
 **某專案不想要記憶** — 什麼都不用做：沒有 `.ai/memory/` 的專案，所有 hooks 立即 exit 0，零成本。
 
-**摘要過期** — 帳本 >2 小時未更新會標 STALE，摘要提醒「先驗證再信任」。跑 `node coderecall.js status`，請 agent 重寫 NOW/NEXT。
+**摘要過期** — 帳本 >2 小時未更新會標 STALE，摘要提醒「先驗證再信任」。跑 `coderecall status`，請 agent 重寫 NOW/NEXT。
 
-**帳本太大** — 跑 `node coderecall.js consolidate`；`doctor` 會在單檔 > ~4KB 時警告。
+**帳本太大** — 跑 `coderecall consolidate`；`doctor` 會在單檔 > ~4KB 時警告。
 
-**解除安裝** — 全域 hooks：`install.ps1 -Uninstall` / `install.sh --uninstall`（只移除 coderecall 項目）。單一專案：`node coderecall.js deinit`（dry-run）→ `--yes`（執行），保留你在共享檔中的內容。
+**解除安裝** — 全域 hooks：`install.ps1 -Uninstall` / `install.sh --uninstall`（只移除 coderecall 項目）。單一專案：`coderecall deinit`（dry-run）→ `--yes`（執行），保留你在共享檔中的內容。
 
 ---
 
