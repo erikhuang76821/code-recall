@@ -130,8 +130,17 @@ function isMemoStarEntry(entry) {
   if (!entry || !Array.isArray(entry.hooks)) return false;
   return entry.hooks.some(function (h) {
     const cmd = h && typeof h.command === "string" ? h.command : "";
-    const lc = cmd.toLowerCase();
-    return lc.indexOf("coderecall") !== -1 || lc.indexOf(hooksDir.toLowerCase()) !== -1;
+    // The command is written through JSON.stringify, so a Windows path is stored
+    // with DOUBLED backslashes while hooksDir has single ones, and "coderecall"
+    // does not appear in a clone named code-recall. Comparing them raw made a
+    // re-run append a second copy of every hook while reporting "already there".
+    // split/join avoids regex-escaping traps in this quoted-inline script.
+    const np = function (x) {
+      return String(x).toLowerCase().split("\\\\").join("\\").split("/").join("\\");
+    };
+    const nc = np(cmd);
+    return nc.indexOf("coderecall") !== -1 || nc.indexOf(np(hooksDir)) !== -1 ||
+      /(?:sessionstart|precompact|stop|userpromptsubmit)\.js/.test(nc);
   });
 }
 

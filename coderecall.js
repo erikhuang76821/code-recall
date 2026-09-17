@@ -71,7 +71,7 @@ const DIGEST_DECISIONS_TOPN = 12;      // newest current-decision TITLES listed 
 const DIGEST_LESSONS_TOPN = 8;         // active-lesson TITLES surfaced alongside decisions (same anti-fragmentation rationale: the agent should SEE which pitfalls exist, not just their count). Listed after decisions so decisions win the shared fence budget.
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.14.0';
+const VERSION = '2.15.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -1510,6 +1510,7 @@ function cmdInit() {
   const agentsResult = upsertSection(AGENTS_FILE);
   const claudeResult = ensureClaudeStub();
   const gitignoreResult = ensureGitignore();
+  const skillResults = installSkills();
 
   console.log('coderecall init complete — this project now has a decision log at .ai/memory/ (per-project, lives in THIS repo).');
   if (created.length) console.log('  created: ' + created.join(', '));
@@ -1517,6 +1518,7 @@ function cmdInit() {
   console.log('  AGENTS.md marker section: ' + agentsResult);
   console.log('  CLAUDE.md stub: ' + claudeResult);
   console.log('  .gitignore (hybrid: durable knowledge committed, working state local): ' + gitignoreResult);
+  for (const s of skillResults) console.log('  skill: ' + s.rel + ' — ' + s.result);
   console.log('');
   console.log('Git policy: DECISIONS.md / LESSONS.md travel with the repo; TASK.md / sessions.md');
   console.log('stay local (per-developer). Edit the .gitignore block to change this.');
@@ -1526,14 +1528,46 @@ function cmdInit() {
   // `npm root -g`; __dirname is where this file actually lives, npm-global or
   // clone. The old ending also contradicted itself ("installs ONCE per machine:
   // npm i -g" vs "No global install needed") — that belongs in `help`, not here.
-  console.log('Next: register the Claude Code hooks once per machine (auto-injects this ledger at every session start / after compaction):');
-  if (process.platform === 'win32') {
-    console.log('  powershell -ExecutionPolicy Bypass -File "' + path.join(__dirname, 'install.ps1') + '"');
-  } else {
-    console.log('  sh "' + path.join(__dirname, 'install.sh') + '"');
-  }
+  console.log('Next: wire up the clients on this machine so the ledger is injected automatically');
+  console.log('at every session start and after every compaction:');
+  console.log('  coderecall setup');
   console.log('Then check it: coderecall doctor');
-  console.log('(Other tools read AGENTS.md directly — no hooks needed. `coderecall sync --all` adds per-tool stubs.)');
+  console.log('(Any tool that reads AGENTS.md already follows the protocol without setup.)');
+}
+
+/**
+ * Where the recitation skill is placed in a project (B6).
+ *
+ * The AGENTS.md section carries the minimal behavioural contract, because a tool
+ * that never triggers a skill must still know the protocol. The SKILL.md is the
+ * detailed manual — examples, thresholds, the retire/reconfirm procedures — and
+ * it costs nothing until a tool decides to load it, which is the whole point of
+ * the Agent Skills convention.
+ *
+ * `.agents/skills/` is the cross-vendor location (Codex CLI reads it, alongside a
+ * growing list of other tools); `.claude/skills/` is Claude Code's project-level
+ * skill directory. Both are plain files that belong in the repo — unlike the
+ * generated hook configs, they contain no machine-specific paths.
+ */
+const SKILL_TARGETS = [
+  { rel: path.join('.agents', 'skills', 'coderecall', 'SKILL.md'), why: 'Codex CLI + the Agent Skills convention' },
+  { rel: path.join('.claude', 'skills', 'coderecall', 'SKILL.md'), why: 'Claude Code project skill' },
+];
+
+function installSkills() {
+  const src = path.join(__dirname, 'skills', 'coderecall', 'SKILL.md');
+  const body = readFileSafe(src);
+  if (body === null) return [{ rel: '(skill source missing)', result: 'skipped' }];
+  const out = [];
+  for (const t of SKILL_TARGETS) {
+    const dest = path.join(CWD, t.rel);
+    const before = readFileSafe(dest);
+    if (before === body) { out.push({ rel: t.rel, result: 'unchanged' }); continue; }
+    ensureDir(path.dirname(dest));
+    writeFileAtomic(dest, body);
+    out.push({ rel: t.rel, result: before === null ? 'created' : 'refreshed' });
+  }
+  return out;
 }
 
 function cmdSync(all, opts) {
@@ -1543,6 +1577,7 @@ function cmdSync(all, opts) {
   console.log('AGENTS.md marker section: ' + agentsResult);
   const claudeResult = ensureClaudeStub();
   console.log('CLAUDE.md stub: ' + claudeResult);
+  for (const s of installSkills()) console.log('skill ' + s.result + ': ' + s.rel);
   if (opts.codex) {
     const r = syncCodexHooks(!!opts.userLevel);
     console.log('Codex SessionStart hook (' + path.relative(CWD, r.dest).replace(/^\.\.[\\/]/, '') + '): ' + r.result);
@@ -1586,6 +1621,176 @@ function cmdSync(all, opts) {
     console.log('.gemini/settings.json context.fileName: ' + syncGeminiSettings());
     console.log('.cursor/hooks.json stop heartbeat: ' + syncCursorHooks() + '  (best-effort; verify against your Cursor version)');
   }
+}
+
+// ---------------------------------------------------------------------------
+// setup — one non-interactive command that wires this machine's clients up (B5)
+// ---------------------------------------------------------------------------
+
+/** Is `bin` runnable from a plain shell? Used for detection, never for writes. */
+function onPath(bin) {
+  const cp = require('child_process');
+  try {
+    cp.execSync(process.platform === 'win32' ? 'where ' + bin : 'command -v ' + bin,
+      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000 });
+    return true;
+  } catch (e) { return false; }
+}
+
+function detectClients() {
+  return {
+    claude: fs.existsSync(path.join(os.homedir(), '.claude')) || onPath('claude'),
+    codex: fs.existsSync(path.join(os.homedir(), '.codex')) || onPath('codex'),
+  };
+}
+
+/**
+ * Register the three Claude Code hooks in ~/.claude/settings.json.
+ *
+ * This is install.sh's merge, moved into the CLI: same backup-first, same
+ * never-clobber, same idempotency test (an entry is ours if a command mentions
+ * coderecall or our hooks dir), same refusal on shell-unsafe paths, same absolute
+ * node path (a GUI-launched client may have no node on PATH). Having it here
+ * means one implementation instead of a PowerShell one and a shell one that can
+ * drift, and it means `coderecall setup` works without hunting for a script
+ * inside the npm package.
+ */
+function setupClaudeHooks() {
+  const settingsPath = process.env.CODE_RECALL_SETTINGS || path.join(os.homedir(), '.claude', 'settings.json');
+  const hooksDir = path.join(__dirname, 'hooks');
+  const nodeBin = process.execPath;
+  const steps = [];
+  if (/["`$\n\r]/.test(hooksDir) || /["`$\n\r]/.test(nodeBin)) {
+    return { steps: [{ status: 'refused', what: 'a path used in the hook command contains shell-unsafe characters (" ` $ or newline): ' + hooksDir }] };
+  }
+  const events = [
+    { ev: 'SessionStart', script: 'sessionstart.js', matcher: 'startup|resume|clear|compact' },
+    { ev: 'PreCompact', script: 'precompact.js', matcher: '' },
+    { ev: 'Stop', script: 'stop.js', matcher: '' },
+  ];
+  const raw = readFileSafe(settingsPath);
+  let settings = {};
+  if (raw !== null && raw.trim().length) {
+    try { settings = JSON.parse(raw); } catch (e) {
+      // Never overwrite a config we could not parse — the user's other hooks live here.
+      return { steps: [{ status: 'refused', what: settingsPath + ' is not valid JSON, so nothing was changed (' + e.message + ')' }] };
+    }
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      return { steps: [{ status: 'refused', what: settingsPath + ' is not a JSON object, so nothing was changed' }] };
+    }
+  }
+  if (!settings.hooks || typeof settings.hooks !== 'object' || Array.isArray(settings.hooks)) settings.hooks = {};
+  // Recognising our own entry is what makes this idempotent, and it is easy to get
+  // wrong: the command is written through JSON.stringify, so a Windows path is
+  // stored with DOUBLED backslashes, while the needle we compare against has
+  // single ones — and "coderecall" does not appear in a clone named `code-recall`.
+  // Both together made a re-run append a second copy of every hook while cheerfully
+  // reporting "unchanged". Normalise separators on both sides, and also match the
+  // hook filenames, which are unambiguous whatever the directory is called.
+  const normPath = (s) => String(s).toLowerCase().replace(/\\\\/g, '\\').replace(/\//g, '\\');
+  const hooksNeedle = normPath(hooksDir);
+  const ours = (entry) => {
+    if (!entry || !Array.isArray(entry.hooks)) return false;
+    return entry.hooks.some((h) => {
+      const c = (h && typeof h.command === 'string') ? normPath(h.command) : '';
+      if (!c) return false;
+      return c.indexOf('coderecall') !== -1 ||
+        c.indexOf(hooksNeedle) !== -1 ||
+        /(?:sessionstart|precompact|stop|userpromptsubmit)\.js/.test(c);
+    });
+  };
+  let changed = false;
+  for (const e of events) {
+    if (!Array.isArray(settings.hooks[e.ev])) settings.hooks[e.ev] = settings.hooks[e.ev] ? [settings.hooks[e.ev]] : [];
+    if (settings.hooks[e.ev].some(ours)) { steps.push({ status: 'unchanged', what: e.ev + ' hook already registered' }); continue; }
+    settings.hooks[e.ev].push({
+      matcher: e.matcher,
+      hooks: [{ type: 'command', command: JSON.stringify(nodeBin) + ' ' + JSON.stringify(path.join(hooksDir, e.script)) }],
+    });
+    steps.push({ status: 'registered', what: e.ev + ' hook -> ' + e.script });
+    changed = true;
+  }
+  if (changed) {
+    if (raw !== null) {
+      try {
+        const stamp = nowIso().replace(/[:.]/g, '-');
+        fs.copyFileSync(settingsPath, settingsPath + '.coderecall.bak.' + stamp);
+        steps.push({ status: 'note', what: 'backed up the previous settings.json next to it' });
+      } catch (e) { steps.push({ status: 'note', what: 'could not write a settings.json backup (' + e.message + ')' }); }
+    }
+    ensureDir(path.dirname(settingsPath));
+    writeFileAtomic(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  }
+  steps.push({ status: 'note', what: 'restart any open Claude Code session for the hooks to take effect' });
+  return { steps: steps, settingsPath: settingsPath };
+}
+
+/**
+ * Project-scoped MCP registration (.mcp.json), read by Claude Code and Copilot CLI.
+ * Prefers the `coderecall` bin so the file is committable; falls back to this
+ * machine's absolute paths and SAYS SO, because that form must not be shared.
+ */
+function setupProjectMcp() {
+  const usable = onPath('coderecall');
+  const server = usable
+    ? { command: 'coderecall', args: ['mcp'] }
+    : { command: process.execPath, args: [path.join(__dirname, 'coderecall.js'), 'mcp'] };
+  const res = mergeJsonFile(path.join(CWD, '.mcp.json'), (obj) => {
+    if (!obj.mcpServers || typeof obj.mcpServers !== 'object' || Array.isArray(obj.mcpServers)) obj.mcpServers = {};
+    const before = JSON.stringify(obj.mcpServers.coderecall);
+    obj.mcpServers.coderecall = server;
+    return JSON.stringify(server) !== before;
+  });
+  return { result: res, portable: usable };
+}
+
+function cmdSetup(args) {
+  const { opts } = parseFlagArgs(['setup'].concat(args.slice(1)), { user: 1, project: 1, mcp: 1, 'dry-run': 1 });
+  requireLedger();
+  const detected = detectClients();
+  const want = (opts.client || 'auto').toLowerCase();
+  const doClaude = want === 'claude' || want === 'all' || (want === 'auto' && detected.claude);
+  const doCodex = want === 'codex' || want === 'all' || (want === 'auto' && detected.codex);
+
+  console.log('coderecall setup — project: ' + CWD);
+  console.log('  detected on this machine: ' +
+    (detected.claude ? 'Claude Code ' : '') + (detected.codex ? 'Codex CLI ' : '') +
+    (!detected.claude && !detected.codex ? '(none — nothing to wire up; AGENTS.md still covers any tool that reads it)' : ''));
+  console.log('');
+
+  // The project's own files first: they are what every tool reads, hooks or not.
+  for (const s of installSkills()) console.log('  [' + s.result + '] ' + s.rel);
+  console.log('  [' + upsertSection(AGENTS_FILE) + '] AGENTS.md protocol section');
+
+  if (doClaude) {
+    console.log('');
+    console.log('Claude Code:');
+    const r = setupClaudeHooks();
+    for (const s of r.steps) console.log('  [' + s.status + '] ' + s.what);
+  }
+  if (doCodex) {
+    console.log('');
+    console.log('Codex CLI:');
+    const userLevel = !!opts.user;
+    const r = syncCodexHooks(userLevel);
+    console.log('  [' + r.result + '] SessionStart hook in ' + r.dest);
+    console.log('  [needs trust] run /hooks inside Codex and trust the coderecall entry — until then it is skipped with no error');
+    if (!userLevel) console.log('  [needs trust] this project must also be trusted in Codex; an untrusted project does not load .codex/hooks.json at all');
+    if (!onPath('node')) console.log('  [warning] node does not resolve on PATH, and the hook command needs it');
+  }
+  if (opts.mcp) {
+    console.log('');
+    console.log('MCP (project scope, read by Claude Code and Copilot CLI):');
+    const m = setupProjectMcp();
+    console.log('  [' + m.result + '] .mcp.json' + (m.portable ? '' : ' — uses THIS machine\'s absolute paths because `coderecall` is not on PATH; do not commit it as-is'));
+  }
+
+  console.log('');
+  console.log('Status words mean exactly what they say: `registered` is a config file written,');
+  console.log('not proof the client ran it. Run `coderecall doctor` for what can be observed,');
+  console.log('and start the client once to confirm the ledger actually reaches the model.');
+  console.log('Sources this command does NOT inspect (so it cannot report on them): plugin-bundled');
+  console.log('hooks, enterprise/managed policy, and per-tool settings outside the files above.');
 }
 
 function cmdStatus() {
@@ -2667,7 +2872,11 @@ function cmdDeinit(apply) {
   // 1. Marker sections (AGENTS.md + shared files) — preserve user content.
   const sectionFiles = [AGENTS_FILE, path.join(CWD, 'GEMINI.md'), path.join(CWD, '.github', 'copilot-instructions.md')];
   // 2. coderecall-owned namespaced stubs — full delete.
-  const ownedStubs = STUBS.filter((s) => !s.shared).map((s) => path.join(CWD, s.rel));
+  const ownedStubs = STUBS.filter((s) => !s.shared).map((s) => path.join(CWD, s.rel))
+    // Skill copies and the generated Codex hook config are ours too: they are
+    // written by init/sync/setup, so deinit must take them back out.
+    .concat(SKILL_TARGETS.map((s) => path.join(CWD, s.rel)))
+    .concat([path.join(CWD, '.codex', 'hooks.json')]);
   // 3. Native config un-merge (Gemini contextFileName, Cursor stop hook).
   // 4. CLAUDE.md @AGENTS.md import line. 5. The ledger itself.
 
@@ -2695,7 +2904,16 @@ function cmdDeinit(apply) {
 
   for (const f of ownedStubs) {
     if (fs.existsSync(f)) { try { fs.unlinkSync(f); console.log('  deleted: ' + rel(f)); } catch (e) { console.log('  FAILED to delete ' + rel(f) + ': ' + e.message); } }
-    rmdirIfEmpty(path.dirname(f));
+    // Walk up while the directories we created are empty (.agents/skills/coderecall
+    // -> .agents/skills -> .agents), so removal leaves no skeleton behind. Stops at
+    // the first non-empty directory, so a user's own .claude/ or .agents/ content
+    // is never touched.
+    let dir = path.dirname(f);
+    for (let up = 0; up < 3 && path.resolve(dir) !== path.resolve(CWD); up++) {
+      rmdirIfEmpty(dir);
+      if (fs.existsSync(dir)) break;
+      dir = path.dirname(dir);
+    }
   }
 
   // Gemini un-merge: drop AGENTS.md from contextFileName.
@@ -3795,6 +4013,67 @@ function cmdSelftest() {
       } finally { rmrf(udir); }
     }
 
+    // --- B5/B6: one setup command, and the skill placed where tools look ---
+    {
+      const sdir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-setup-'));
+      try {
+        const fakeSettings = path.join(sdir2, 'settings.json');
+        const env = Object.assign({}, process.env, { CODE_RECALL_SETTINGS: fakeSettings });
+        const srun2 = (a, e) => cp.execFileSync(process.execPath, [__filename].concat(a),
+          { cwd: sdir2, encoding: 'utf8', env: e || env });
+        srun2(['init']);
+        // B6: init places the skill where each family of tools looks for it.
+        check('B6: init installs the skill for the .agents convention',
+          fs.existsSync(path.join(sdir2, '.agents', 'skills', 'coderecall', 'SKILL.md')));
+        check('B6: init installs the skill for Claude Code',
+          fs.existsSync(path.join(sdir2, '.claude', 'skills', 'coderecall', 'SKILL.md')));
+        check('B6: the installed skill is the real one, not a stub',
+          /coderecall search/.test(fs.readFileSync(path.join(sdir2, '.agents', 'skills', 'coderecall', 'SKILL.md'), 'utf8')));
+        check('B6: init points at `coderecall setup` rather than a script path hunt',
+          /coderecall setup/.test(srun2(['init'])));
+        // B5: a pre-existing settings.json with the user's own hook must survive.
+        fs.writeFileSync(fakeSettings, JSON.stringify({
+          theme: 'dark',
+          hooks: { Stop: [{ matcher: '', hooks: [{ type: 'command', command: 'echo user-hook' }] }] },
+        }, null, 2), 'utf8');
+        const out1 = srun2(['setup', '--client', 'claude']);
+        const merged = JSON.parse(fs.readFileSync(fakeSettings, 'utf8'));
+        check('B5: setup registers all three Claude Code hooks',
+          ['SessionStart', 'PreCompact', 'Stop'].every((ev) => (merged.hooks[ev] || []).some(
+            (g) => (g.hooks || []).some((h) => /sessionstart\.js|precompact\.js|stop\.js/.test(h.command || '')))));
+        check('B5: setup preserves an unrelated setting', merged.theme === 'dark');
+        check('B5: setup preserves the user\'s own hook',
+          (merged.hooks.Stop || []).some((g) => (g.hooks || []).some((h) => /echo user-hook/.test(h.command || ''))));
+        check('B5: setup backs the settings file up before changing it',
+          fs.readdirSync(sdir2).some((n) => n.indexOf('settings.json.coderecall.bak.') === 0));
+        // Re-running must not duplicate.
+        const out2 = srun2(['setup', '--client', 'claude']);
+        const again = JSON.parse(fs.readFileSync(fakeSettings, 'utf8'));
+        check('B5: re-running setup does not duplicate hooks',
+          again.hooks.SessionStart.length === 1 && again.hooks.Stop.length === 2);
+        check('B5: re-running reports them as unchanged', /\[unchanged\]/.test(out2));
+        // It must never claim more than it knows.
+        check('B5: setup does not claim the client actually ran the hook',
+          !/\[verified\]/.test(out1) && /not proof the client ran it/.test(out1));
+        check('B5: setup names the sources it did not inspect', /does NOT inspect/.test(out1));
+        // A settings.json we cannot parse is left alone.
+        fs.writeFileSync(fakeSettings, '{ this is not json', 'utf8');
+        const out3 = srun2(['setup', '--client', 'claude']);
+        check('B5: an unparseable settings.json is refused, not overwritten',
+          /\[refused\]/.test(out3) && fs.readFileSync(fakeSettings, 'utf8') === '{ this is not json');
+        // Paths containing a space must survive the quoting.
+        const spaced = fs.mkdtempSync(path.join(os.tmpdir(), 'cr setup space-'));
+        try {
+          const s2 = path.join(spaced, 'settings.json');
+          srun2(['setup', '--client', 'claude'], Object.assign({}, process.env, { CODE_RECALL_SETTINGS: s2 }));
+          const m2 = JSON.parse(fs.readFileSync(s2, 'utf8'));
+          const cmd = m2.hooks.SessionStart[0].hooks[0].command;
+          check('B5: a node path containing a space is quoted correctly',
+            /^".*node(\.exe)?" ".*sessionstart\.js"$/i.test(cmd));
+        } finally { rmrf(spaced); }
+      } finally { rmrf(sdir2); }
+    }
+
     // --- B3: the generated Codex hook config ---
     // The command shape here is not cosmetic: a commandWindows that STARTS with a
     // quoted absolute path makes Codex skip the hook silently on Windows (isolated
@@ -4403,9 +4682,10 @@ function cmdMcp() {
 function main() {
   const args = process.argv.slice(2);
   const cmd = args[0];
-  const usage = 'usage: node coderecall.js <init|sync [--all|--codex [--user]]|status|check [--strict]|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history] [--full]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|affected [--staged] [--base <ref>] [--json]|decision "<title>" [--context/--decision/--consequences/--status/--confidence/--code]|resolve-lesson "<title>" [--status resolved|obsolete] [--note ..]|reconfirm "<title>" [--file decisions|lessons] [--confidence ..]|mcp|score [--json]|selftest|version>';
+  const usage = 'usage: node coderecall.js <init|setup [--client claude|codex|all] [--user] [--mcp]|sync [--all|--codex [--user]]|status|check [--strict]|doctor [--selftest]|digest [--compact]|snapshot|consolidate|search <query> [--limit N] [--history] [--full]|deinit [--yes]|precommit [--strict]|install-githook [--strict]|remove-githook|graduate [--global]|decisions [--all]|affected [--staged] [--base <ref>] [--json]|decision "<title>" [--context/--decision/--consequences/--status/--confidence/--code]|resolve-lesson "<title>" [--status resolved|obsolete] [--note ..]|reconfirm "<title>" [--file decisions|lessons] [--confidence ..]|mcp|score [--json]|selftest|version>';
   switch (cmd) {
     case 'init': return cmdInit();
+    case 'setup': return cmdSetup(args);
     case 'sync': return cmdSync(args.includes('--all'), { codex: args.includes('--codex'), userLevel: args.includes('--user') });
     case 'status': return cmdStatus();
     case 'check': return cmdCheck(args.includes('--strict'));

@@ -173,21 +173,22 @@ Creates `.ai/memory/` and inserts a protocol section into `AGENTS.md` (the instr
 
 **Git ownership (hybrid by default):** `init` writes a `.gitignore` block — **durable team knowledge (`DECISIONS.md` / `LESSONS.md` + archives) is committed**, while **each developer's volatile working state (`TASK.md` / `sessions.md` / pre-compaction snapshots) stays local**. So `TASK.md` won't cause multi-dev `NOW:`/`NEXT:` merge conflicts, and git history isn't flooded by machine edits. Want a solo private repo to track live state too? Delete the `TASK.md` lines from the block. (The committed `AGENTS.md` **deliberately does not embed** live `NOW:`/`NEXT:`, to avoid leaking state.)
 
-### 2. Install global hooks (once per machine, Claude Code only)
+### 2. Wire up your clients (once per machine)
 
-`coderecall init` prints the exact command for your machine, with the full path — the installer ships **inside the package**, so after `npm i -g` it is not in your project directory:
-
-```powershell
-# Windows — use the path `coderecall init` printed, e.g.:
-powershell -ExecutionPolicy Bypass -File "$(npm root -g)@erikhuangcoderecallinstall.ps1"
-```
 ```sh
-# macOS / Linux
-sh "$(npm root -g)/@erikhuang/coderecall/install.sh"
+coderecall setup
 ```
 
-The installer only **merges** into `~/.claude/settings.json`: backs up first, never clobbers existing hooks, idempotent. Uninstall: `install.ps1 -Uninstall` / `install.sh --uninstall`. Verify with `coderecall doctor`.
+Detects what you have and registers what each one needs — Claude Code hooks (SessionStart / PreCompact / Stop) and the Codex CLI SessionStart hook. Non-interactive, idempotent, and it backs up `~/.claude/settings.json` before touching it, never clobbers your other hooks, and refuses to write over a settings file it cannot parse.
 
+```sh
+coderecall setup --client codex --user   # Codex, for every project
+coderecall setup --mcp                   # also write a project .mcp.json
+```
+
+> `registered` means a config file was written — not that the client ran the hook. Only the client can show that, so start it once and check. `coderecall doctor` reports everything that *can* be observed, and setup tells you which sources it did not inspect (plugin-bundled hooks, managed policy) rather than implying a clean sweep.
+
+The older `install.ps1` / `install.sh` still work and do the Claude Code half; `setup` is the same logic in one place, and it does not need you to find a script inside the npm package. Uninstall: `install.ps1 -Uninstall` / `install.sh --uninstall`.
 ### 3. Done
 
 No manual steps after that — hooks auto-inject the task digest at every session start / after compaction, and the agent rewrites the ledger per the protocol.
@@ -205,7 +206,8 @@ node /path/to/code-recall/coderecall.js <command>
 
 | Command | What it does |
 |---|---|
-| `init` | Create `.ai/memory/` + AGENTS.md protocol section + CLAUDE.md stub |
+| `init` | Create `.ai/memory/` + AGENTS.md protocol section + CLAUDE.md stub + the skill copies |
+| `setup [--client claude|codex|all] [--user] [--mcp]` | Wire up the clients on this machine: Claude Code hooks, the Codex SessionStart hook, optionally a project `.mcp.json`. Non-interactive and idempotent |
 | `sync [--all|--codex [--user]]` | Refresh AGENTS.md; `--all` also writes per-tool stubs + Gemini/Cursor native config; `--codex` registers the SessionStart hook with Codex CLI |
 | `status` | Show GOAL/NOW/NEXT, checklist, file sizes, drift, freshness |
 | `doctor [--selftest]` | Health check (hooks/ledger/paths/lint/Codex 32KiB); `--selftest` also runs the regression test |

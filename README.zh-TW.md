@@ -168,21 +168,22 @@ coderecall init                     # 在「這個專案」建立 ./.ai/memory/
 
 **Git 歸屬（預設 hybrid）：** `init` 會在 `.gitignore` 寫入一段——**耐久的團隊知識（`DECISIONS.md` / `LESSONS.md` + 歸檔）進版控**，**每位開發者各自的工作狀態（`TASK.md` / `sessions.md` / 壓縮快照）留本機**。這樣 `TASK.md` 不會在多人之間造成 `NOW:`/`NEXT:` 合併衝突，git 歷史也不會被機器高頻改動洗版。想在個人私有 repo 也追蹤即時狀態？刪掉 `.gitignore` 區段裡的 `TASK.md` 兩行即可。（committed 的 `AGENTS.md` **刻意不嵌入**即時 `NOW:`/`NEXT:`，避免狀態外洩。）
 
-### 2. 安裝全域 Hooks（每台機器一次，僅 Claude Code 需要）
+### 2. 接上你的 client（每台機器一次）
 
-`coderecall init` 會印出你這台機器的完整命令。安裝程式在**套件裡**,`npm i -g` 之後它不在你的專案目錄:
-
-```powershell
-# Windows — 用 `coderecall init` 印出的路徑,例如:
-powershell -ExecutionPolicy Bypass -File "$(npm root -g)@erikhuangcoderecallinstall.ps1"
-```
 ```sh
-# macOS / Linux
-sh "$(npm root -g)/@erikhuang/coderecall/install.sh"
+coderecall setup
 ```
 
-安裝程式只會「合併」進 `~/.claude/settings.json`：先備份、絕不覆蓋既有 hooks、可重複執行（idempotent）。解除安裝：`install.ps1 -Uninstall` / `install.sh --uninstall`。裝完用 `coderecall doctor` 檢查。
+會偵測你裝了什麼,並各自註冊需要的東西 — Claude Code 的 hooks(SessionStart / PreCompact / Stop)與 Codex CLI 的 SessionStart hook。非互動、可重複執行;動 `~/.claude/settings.json` 之前先備份,不會蓋掉你其他的 hooks,遇到無法解析的設定檔會拒絕寫入。
 
+```sh
+coderecall setup --client codex --user   # Codex,套用到所有專案
+coderecall setup --mcp                   # 順便寫一份專案 .mcp.json
+```
+
+> `registered` 的意思是「設定檔寫好了」,不代表 client 真的跑了那個 hook — 那只有 client 自己能證明,所以請啟動一次確認。`coderecall doctor` 會回報所有**可觀察**的部分,而 setup 會明講它沒有檢查哪些來源(plugin 內建的 hooks、企業政策),而不是假裝全部掃過。
+
+舊的 `install.ps1` / `install.sh` 仍可用,負責 Claude Code 那一半;`setup` 是同一套邏輯集中在一處,而且不用你去 npm 套件裡找腳本。解除安裝:`install.ps1 -Uninstall` / `install.sh --uninstall`。
 ### 3. 完成
 
 之後不需手動操作 — Hooks 在每次 session 開始 / 壓縮後自動注入任務摘要，agent 依協定改寫帳本。
