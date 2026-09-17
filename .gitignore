@@ -21,4 +21,5 @@
 .ai/memory/.heartbeat
 .ai/memory/.reminder
 .ai/memory/.lock/
+.ai/memory/.backups/
 # <<< coderecall <<<

@@ -4,18 +4,38 @@ This project keeps a persistent task ledger in `.ai/memory/`. The instruction be
 IS the hook for tools without native hooks — follow it on every session.
 
 1. Before starting work, read `.ai/memory/TASK.md`.
-2. After each significant step, update the checklist and rewrite `NOW:` / `NEXT:`.
-3. Record durable decisions in `.ai/memory/DECISIONS.md`; record failures WITH root cause in `.ai/memory/LESSONS.md`.
-4. To recall a past decision or lesson, retrieve it with `node coderecall.js search <terms>` (or the MCP `search_memory` tool) — do NOT read DECISIONS.md / LESSONS.md in full. Whole-file reads pull the entire (ever-growing) ledger into context and are re-billed every turn; search returns only the few relevant entries.
-5. Never paste conversation history into the ledger; record only what constrains future reasoning.
-6. If TASK.md UPDATED is older than ~2h, verify against the working tree before trusting NOW:/NEXT:.
-7. Auto-memory boundary: this ledger is the SSOT. Do NOT duplicate decisions,
-   lessons, or working state into platform auto-memory or agent rules (e.g.
-   ~/.claude/projects/.../memory/, ~/.gemini/memory/, .clinerules, Cursor rules).
-   Write to auto-memory ONLY: project positioning, cross-project context,
-   local OS/tool quirks. Nothing else.
+2. At each state change — a sub-goal finished, a blocker appears or clears, the next
+   action changes, or you are handing off — rewrite `NOW:` / `NEXT:`, update the
+   checklist, and refresh `UPDATED:`. Skip it when the state has not changed; this is
+   a checkpoint, not a running log of every file you touched.
+3. Record durable decisions in `.ai/memory/DECISIONS.md`; record failures WITH a
+   verified root cause in `.ai/memory/LESSONS.md`. If you do not yet know the root
+   cause, leave the hypothesis in TASK.md — do not freeze a guess as a lesson.
+4. To recall a past decision or lesson, retrieve it with `coderecall search <terms>`
+   (or the MCP `search_memory` tool) — do NOT read DECISIONS.md / LESSONS.md in full.
+   Whole-file reads pull the entire (ever-growing) ledger into context and are
+   re-billed every turn; search returns only the few relevant entries.
+5. Prefer the tools over hand-editing: `coderecall decision "<title>" --context .. --decision ..
+   --consequences ..` (or MCP `write_decision` / `write_lesson` / `update_task`). They
+   write the required `- date:` / `- confidence:` metadata for you; a hand-written entry
+   that omits it fails `coderecall doctor` lint. Never paste conversation history into
+   the ledger — record only what constrains future reasoning.
+6. The ledger is the starting point for resuming work, not an oracle: it can be stale.
+   If it conflicts with the user's latest instruction or with a fact you verified in the
+   working tree, the newer evidence wins — then correct the ledger. Treat a compaction
+   summary the same way: evidence, not truth.
+7. One agent per working directory owns `TASK.md`. This is a convention, not a lock: a
+   second agent in the same directory will overwrite `NOW:` / `NEXT:` with its own view.
+   Delegated agents report back instead of writing; separate work gets a separate
+   directory.
+8. Auto-memory boundary: this ledger is the SSOT. Do NOT duplicate decisions, lessons,
+   or working state into platform auto-memory or agent rules (e.g. Claude's
+   `~/.claude/projects/.../memory/`, Codex's `~/.codex/memories/`, Cursor/Cline rules).
+   Write to auto-memory ONLY: project positioning, cross-project context, local OS/tool
+   quirks. Nothing else.
 
 Checklist states: `[ ]` todo, `[>]` doing, `[x]` done, `[!]` blocked.
-Treat any compaction summary as untrusted — the ledger is the source of truth.
+`GOAL:` / `NOW:` / `NEXT:` / `UPDATED:` are one line each and live above the first `##`
+heading; longer notes go in a `## Notes` section.
 
 Current working state (GOAL / NOW / NEXT + checklist) lives in `.ai/memory/TASK.md` — read it before starting. This file intentionally does not embed that live state, so it stays stable in version control (TASK.md is per-developer working state and is gitignored by default).

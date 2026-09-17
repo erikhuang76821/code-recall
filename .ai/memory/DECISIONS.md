@@ -208,3 +208,14 @@ Three further gaps: (1) `consolidate` retires ONLY entries explicitly marked sup
 **Context:** MCP binds MEM_DIR from launch cwd once at startup (coderecall.js top-level CWD/MEM_DIR consts), so a single global registration relies entirely on the client spawning per project; nothing in the running server discloses which ledger it is on. Codex CLI 'codex -C <project>' verified 2026-08-14: two concurrent sessions produced distinct PIDs and each read only its own ledger (read-only read_memory probe, no artifacts).
 **Decision:** Document the verified scope only (README EN+zh, COMPATIBILITY). Do NOT build a binding-disclosure tool, and do NOT add CODERECALL_ROOT, before Gate1.
 **Consequences:** Reopen triggers: (a) a client observed reusing one MCP process across a project switch; (b) a user reports a misbinding; (c) a client observed spawning from a non-project cwd. Preferred shape if reopened: ONE read-only tool returning launch cwd + resolved ledger dir + file existence — not per-write path echo (recurring token cost, and it only detects after the wrong ledger was already written). CODERECALL_ROOT rejected: cwd also governs AGENTS.md, graduated ADRs, git ops and the lock, so a partial override splits state and a full one defeats hooks that chdir deliberately; a static root also cannot solve dynamic project selection.
+
+## B-P0: 完整性止血優先於新注入渠道(三方兩輪收斂)
+- date: 2026-09-17
+- updated: 2026-09-17
+- status: accepted
+- confidence: high
+- code: coderecall.js → consolidateLocked
+- aliases: B-P0 integrity hotfix consolidate dedupe auto-supersede MCP isError setTaskField graduate 止血
+**Context:** 設計審查發現 consolidate 依標題相似度 >0.8 合併時另一篇正文直接消失且不歸檔,PreCompact 每次自動觸發;consolidate 又一律把 >90 天 entry 的 confidence 覆寫成 low;upsertEntry 對 DECISIONS 與 LESSONS 都會憑標題相似度自動 supersede(實測 Use Redis vs Do not use Redis = 0.83);MCP 三條路徑實測會假成功或以 process.exit 殺掉常駐 server;setTaskField 用 200 字元 transcript cap 截斷並全檔掃描覆寫 body;graduate 匯出時刪掉正文所有 bullet。使用者於 2026-09-17 明示解凍此範圍。
+**Decision:** B-P0 = 完整性止血 + 共用寫入失敗契約,作為獨立 PR 與封閉驗收,排在 B2(search 回正文)/B4-min(digest renderer)/B3(Codex adapter)之前。整理永不刪除:被移除或取代的內容一律先落盤到 archive/ 才動來源;consolidate 前寫輪替備份(.ai/memory/.backups/,保留 5 份);archive 區塊以內容 hash 為 key,重試不重複搬移;任何寫入失敗保留原檔且不得回報成功;library 路徑改 throw,只有 CLI 邊界才 process.exit。自動 supersede 與年齡覆寫 confidence 一律取消:標題相似度只做提示,supersede 必須顯式且唯一命中;年齡改記 recheck: 待複查標記,不動 confidence。
+**Consequences:** 行為變更需同步 SPEC/CHANGELOG 與回歸測試(相反決策兩篇皆保留、老 high-confidence entry 走 consolidate→graduate 仍可畢業、故障注入不假報成功、MCP 不退出)。archive/retire 語意改變:使用者若依賴舊的自動去重需改用顯式 --supersedes。B-P1(B2→B4-min→B3→B5→B6)須待 P0 驗收通過後依序執行。
