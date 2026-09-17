@@ -63,3 +63,12 @@ Launch attempt 2026-07-07: posted the prepared launch text to r/ClaudeAI from a 
 - code: coderecall.js → consolidateLocked
 - aliases: titleOverlap Jaccard dedupe auto-supersede consolidate data loss 相似度 去重 資料遺失
 consolidate 用 titleOverlap>0.8 判定「重複」並刪掉其中一篇(不歸檔),而 PreCompact hook 每次壓縮都自動跑它。根因不是門檻調太低,而是把詞面相似度當成「這兩筆是同一個決策」的判準:titleOverlap("Use Redis for X","Do not use Redis for X")=0.83,所以「記下某決策的反面」就會把原決策吃掉。同一個 upsertEntry 路徑也套用在 LESSONS,而 lesson 根本沒有 supersede 的語意。修法:相似度只能產生「提示」,退役必須顯式且唯一命中;破壞性動作不可放在無人看管的 hook 路徑,且必須先落盤再移除來源。
+
+## 改協定文字時,digest 的那份最容易漏掉,而它才是每個工具都收得到的那份
+- date: 2026-09-17
+- updated: 2026-09-17
+- status: accepted
+- confidence: high
+- code: coderecall.js → buildDigest
+- aliases: protocol wording drift digest AGENTS SKILL 協定 措辭 不一致
+v2.11.0 把 AGENTS-section.md 與 SKILL.md 的規則 2 改成「狀態改變時才寫,不是每次編輯」,卻沒改 buildDigest 裡的同一句,digest 仍說 after each significant step。根因:同一條協定存在三個副本(模板/skill/digest 字串),只有前兩個是檔案、容易一起 grep 到,digest 那份是程式碼裡的字串。而 digest 是唯一每個工具都會收到的表面,不載入 AGENTS.md 的工具只看得到它,所以漏改的那份反而優先級最高。做法:改協定措辭時三處一起改,並以 grep 協定關鍵句作為檢查。

@@ -13,7 +13,11 @@
 [![npm](https://img.shields.io/npm/v/%40erikhuang%2Fcoderecall?label=npm&color=orange)](https://www.npmjs.com/package/@erikhuang/coderecall)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
-Code Recall is a tiny **local decision ledger** for AI coding agents. It holds the thing projects lose most easily and rebuild most expensively — **why a choice was made, and which paths are proven dead ends** — in plain Markdown, and a SessionStart hook **re-injects it in front of the agent the moment context resets** (session start, resume, and after compaction) — with a PreCompact hook snapshotting the conversation tail just before compaction (Claude Code native hooks; instruction-driven on other tools — see below). Not a memory database; not the cloud; not a governance platform. Zero dependencies, stays in the repo, the same setup across **Claude Code / Cursor / Gemini CLI**. Think **"Git for decisions" that survives compaction.**
+Code Recall is a tiny **local decision ledger** for AI coding agents. It holds what projects lose most easily and rebuild most expensively: **why a choice was made, and which paths are proven dead ends.**
+
+Three plain Markdown files in your repo. A SessionStart hook puts them back in front of the agent the moment context resets — session start, resume, and after compaction — and a PreCompact hook snapshots the conversation tail just before it is destroyed. (Native hooks on Claude Code; instruction-driven on other tools, and [verified injecting into Codex CLI](COMPATIBILITY.md) unchanged.)
+
+Not a memory database, not the cloud, not a governance platform. Zero dependencies, travels with the repo. Think **"Git for decisions" that survives compaction.**
 
 **Requirements** · Node ≥ 10.12 (anything since 2018; CI runs Node 18 / 20 × Linux / Windows).
 
@@ -36,10 +40,13 @@ Blocked: - [!] backfill blocked — need prod Redis credentials from ops
 Current decisions (2, newest first — read before proposing changes):
 - Process webhooks async, ack immediately
 - Use Redis SETNX for webhook idempotency
+
+Active lessons (1 — do not retry these):
+- Do not retry the webhook inside the handler
 <<<CODE-RECALL:UNTRUSTED-LEDGER-DATA:END>>>
 ```
 
-The agent re-anchors to the live `NOW` **with its reasoning** (why 24h TTL), sees the blocker *and its cause*, and sees the two decisions already in force — instead of re-deriving or contradicting them. This is the real hook's output; a [CI regression test](#-selftest--ci) on Linux + Windows drives the actual hooks and pins this re-anchor *behavior* (the test uses its own fixture, not this exact ledger).
+The agent re-anchors to the live `NOW` **with its reasoning** (why 24h TTL), sees the blocker *and its cause*, and sees the decisions and dead ends already on file — instead of re-deriving or contradicting them. This is the real hook's output; a [CI regression test](#-selftest--ci) on Linux + Windows drives the actual hooks and pins this re-anchor *behavior* (the test uses its own fixture, not this exact ledger).
 
 <details>
 <summary>The whole ledger that produced it (3 short files)</summary>
@@ -60,7 +67,7 @@ UPDATED: 2026-06-26T10:00:00+08:00
 `DECISIONS.md` holds the two decisions above (Context / Decision / Consequences + status); `LESSONS.md` holds "don't retry X because Y" pitfalls. That's the entire format — plain Markdown, no schema to learn.
 </details>
 
-> **Honest scope of "automatic"** · Full auto-injection is **Claude Code** (native SessionStart/PreCompact hooks). On Cursor / Copilot / Windsurf / Codex it is **instruction-driven** — the protocol text in `AGENTS.md` *is* the hook, so it depends on the tool honoring it, not on a guaranteed lifecycle event. Per-tool reality: [COMPATIBILITY.md](COMPATIBILITY.md).
+> **Honest scope of "automatic"** · Out of the box, full auto-injection is **Claude Code** (native SessionStart/PreCompact hooks). Everywhere else it is **instruction-driven** — the protocol text in `AGENTS.md` *is* the hook, so it depends on the tool honoring it, not on a guaranteed lifecycle event. Several tools (Codex, Cursor, Copilot, Gemini, Devin) have since grown hook APIs of their own; what is shipped versus merely possible is tracked per tool in [COMPATIBILITY.md](COMPATIBILITY.md).
 
 ---
 
@@ -115,6 +122,7 @@ Code Recall follows a "subtractive" philosophy: condense memory into a few stati
 - **🔎 Searchable:** zero-dep BM25 lexical search (English & Chinese), covering cross-month recall.
 - **🧹 Anti-rot:** temporal/supersede/expire model + `doctor` lint + an optional git pre-commit gate minimize "stale ledger misleads you."
 - **🚨 Fail-loud, not fail-silent:** tolerant `TASK.md` parsing + digest/`doctor` warnings surface a malformed or append-drifted ledger — a missing-colon `NOW`, multiple `NOW` lines (appending instead of rewriting), or a `NOW` that's actually finished work — **before** the agent re-anchors to it, instead of silently shipping an empty/misleading anchor. `GOAL`/`NOW`/`NEXT` are parsed only in the header region, so a stray prose line deeper in the file can't hijack the current-state anchor. Authored ADR fields are never silently truncated on write, and the ledger lock carries an ownership token so a long-running write can't have its lock deleted out from under it (no concurrent-writer corruption).
+- **🔒 Nothing is edited behind your back (v2.11.0):** entries are never merged, dropped or downgraded automatically. Retiring a decision means naming it (`--supersedes`); `consolidate` backs the ledger up first, moves content into `archive/` **before** removing it from the live file, and reports near-duplicate titles instead of picking a winner. A write that fails says so — it is never reported as success. ([what this fixed](CHANGELOG.md))
 - **🪟 Windows-first:** PowerShell installer, native Windows 11 support.
 
 > **What it can't do (honest limits)** · The ledger is only as good as its upkeep. If it stops being updated it becomes an *authoritative-looking stale error* — the mitigations are detection (`doctor` lint, the stale flag, fail-loud parsing), not prevention. And it **cannot tell when code has drifted from a decision** — that needs semantic understanding (an LLM/vectors), which is out of the zero-dep scope; Code Recall pushes the *current* decision in front of the agent and warns on write, maximizing the odds it's seen, but it does not detect contradictions. Auto-injection is guaranteed only on Claude Code (above).
@@ -184,7 +192,7 @@ The installer only **merges** into `~/.claude/settings.json`: backs up first, ne
 
 No manual steps after that — hooks auto-inject the task digest at every session start / after compaction, and the agent rewrites the ledger per the protocol.
 
-**Other tools (Cursor / Copilot / Windsurf / Cline / Roo / Gemini / Codex):** run `node coderecall.js sync --all` to generate each tool's instruction stub + native config; the protocol text itself is their hook.
+**Other tools (Codex / Cursor / Copilot / Gemini / Cline / Roo / Devin):** run `coderecall sync --all` to generate each tool's instruction stub + native config. Most of them read `AGENTS.md` natively, so the protocol reaches them even without the stubs.
 
 ---
 
@@ -202,7 +210,7 @@ node /path/to/code-recall/coderecall.js <command>
 | `status` | Show GOAL/NOW/NEXT, checklist, file sizes, drift, freshness |
 | `doctor [--selftest]` | Health check (hooks/ledger/paths/lint/Codex 32KiB); `--selftest` also runs the regression test |
 | `score [--json]` | Rate working-state health (GOAL clarity / NEXT actionability / blockers reasoned / freshness) |
-| `decision "<title>" [--context/--decision/--consequences/--status/--confidence] [--supersedes "<old title/substr>"] [--code "<path → symbol>"]` | Record an ADR decision in one line; `--supersedes` explicitly retires a prior decision (independent of title similarity); `--code` back-links the file/symbol it governs (`doctor` flags it if the path disappears); `--aliases "<synonyms/old names>"` adds extra search terms so lexical search finds it by words not in the title/body |
+| `decision "<title>" [--context/--decision/--consequences/--status/--confidence] [--supersedes "<old title/substr>"] [--code "<path → symbol>"]` | Record an ADR decision in one line; `--supersedes` explicitly retires a prior decision (independent of title similarity); `--code` back-links the file/symbol it governs (`doctor` flags it if the path disappears); `--aliases "<synonyms/old names>"` adds extra search terms so lexical search finds it by words not in the title/body; `--confirm-new` acknowledges a flagged near-duplicate title as a genuinely distinct decision |
 | `search <query> [--limit N] [--history]` | Lexical search — **current truth only by default** (superseded/deprecated/resolved/obsolete/archive excluded); `--history` includes them (labeled `[superseded]` / `[resolved]`) |
 | `decisions [--all]` | **HEAD view:** list current accepted decisions (`--all` includes superseded/deprecated) |
 | `affected [--staged] [--base <ref>] [--json]` | List current decisions/lessons whose `code:` back-link covers your changed files (advisory; file-level, **not** semantic conflict detection) — surfaces what to re-check before you contradict it. Reports coverage so a clean result isn't mistaken for proof |
@@ -210,6 +218,8 @@ node /path/to/code-recall/coderecall.js <command>
 | `reconfirm "<title>" [--file decisions\|lessons] [--confidence ..]` | Re-stamp a still-true entry's `updated:` (and optionally raise confidence) without rewriting it, so recency ranking + the staleness flag treat it as fresh |
 | `digest [--compact]` | Print the session-injection digest (debugging) |
 | `consolidate` | Back up the ledger, archive done items (monthly), retire superseded/expired entries to `archive/`, flag un-rechecked entries. Never merges or drops anything |
+| `check [--strict]` | Ask "did the ledger keep up with the code?" — flags source changes made without a ledger update (`--strict` exits non-zero, for CI) |
+| `graduate [--global]` | Export long-lived, high-confidence entries to conventional `docs/adr/NNNN-*.md` files (+ optional cross-project lessons) |
 | `snapshot` | Write a manual snapshot |
 | `mcp` | Run the zero-dep stdio MCP server (memory write-back as tool calls) |
 | `precommit [--strict]` | Used by the git hook: refresh digest + lint (`--strict` blocks) |
@@ -263,13 +273,13 @@ Code Recall listens to AI-tool lifecycle hooks and accesses memory automatically
 | Agent | How |
 |---|---|
 | ✅ Claude Code | Native hooks (SessionStart / PreCompact / Stop) — inject, snapshot, re-anchor, all automatic |
+| ✅ Codex CLI | AGENTS.md today (`doctor` warns past the ~32KiB read window). Codex 0.154 also ships hooks, and coderecall's own `sessionstart.js` **was verified injecting the digest into gpt-6-astra unchanged** — a supported adapter is next; hand-rolled config in [COMPATIBILITY.md](COMPATIBILITY.md) |
 | ✅ Cursor | `.cursor/rules` instruction hook + `.cursor/hooks.json` Stop heartbeat (`sync --all`) |
-| ✅ GitHub Copilot | `.github/copilot-instructions.md` instruction hook |
-| ✅ Windsurf | `.windsurf/rules` (`trigger: always_on`) |
+| ✅ GitHub Copilot | AGENTS.md natively on CLI / cloud / VS Code, plus a `.github/copilot-instructions.md` section |
+| ✅ Gemini CLI | `.gemini/settings.json` → `context.fileName` loads AGENTS.md (**fixed in v2.11.0** — earlier versions wrote a key Gemini ignores, so it never actually loaded) |
+| ✅ Devin Desktop (was Windsurf) | Reads AGENTS.md natively; `.windsurf/rules` still works as a legacy fallback |
 | ✅ Cline / Roo | `.clinerules` / `.roo/rules` instruction hook |
-| ✅ Gemini CLI | `.gemini/settings.json` loads AGENTS.md natively |
-| ✅ Codex CLI | AGENTS.md (`doctor` warns past the ~32KiB read window) |
-| ✅ Any MCP client | `coderecall mcp` — Claude Desktop / Cursor / VS Code… can call the memory tools directly |
+| ✅ Any MCP client | `coderecall mcp` — Claude Desktop / Cursor / VS Code… call the memory tools directly |
 
 Per-tool truth across the three layers (injection / write-back / compaction survival): see [COMPATIBILITY.md](COMPATIBILITY.md).
 
@@ -326,16 +336,16 @@ Rule of thumb: the digest is the **map** (what exists), `search` loads the **ter
 ### 🔎 Search memory
 
 ```sh
-node coderecall.js search "idempotency key"     # 5 by default
-node coderecall.js search redis retry --limit 3
+coderecall search "idempotency key"     # 5 by default
+coderecall search redis retry --limit 3
 ```
 Zero-dep BM25 lexical search across the ledger + `archive/`, paragraph/entry-level results with score and source.
 
 ### 📊 Working-state score
 
 ```sh
-node coderecall.js score          # human-readable
-node coderecall.js score --json   # for CI / agents
+coderecall score          # human-readable
+coderecall score --json   # for CI / agents
 ```
 
 Answers "can an agent actually pick this ledger up?" — not whether the fields are filled, but a **machine check of actionability**: is GOAL specific, is NEXT a concrete next step (vague values like "continue"/"TBD" score low), does each `[!]` blocker have a reason, is the ledger fresh. Each dimension reports **why** and **what to fix first**. Deliberately a transparent heuristic, not a fake-precision ML score — the point is to catch false completeness ("looks filled, can't drive the next step"). `status` shows the one-line overall.
@@ -343,7 +353,7 @@ Answers "can an agent actually pick this ledger up?" — not whether the fields 
 ### ✅ Self-test / CI
 
 ```sh
-node coderecall.js selftest        # or doctor --selftest / npm test
+coderecall selftest        # or doctor --selftest / npm test
 ```
 Simulates compaction in a throwaway project and **drives the real hook scripts** (sessionstart / precompact), asserting the re-anchor digest contains the full TASK body and that a snapshot is written. GitHub Actions runs it on **Linux + Windows × Node 18/20** on every push/PR — turning the headline claim into a reproducible regression test.
 
@@ -363,27 +373,30 @@ Two more lifecycle moves, both **mark-over-delete** (an entry is never destroyed
 
 ```jsonc
 // Claude Desktop / Cursor / any MCP client
-{ "mcpServers": { "coderecall": { "command": "node", "args": ["<path>/code-recall/coderecall.js", "mcp"] } } }
+{ "mcpServers": { "coderecall": { "command": "coderecall", "args": ["mcp"] } } }
 ```
 ```toml
 # Codex (CLI / Desktop / IDE share one config) — ~/.codex/config.toml
 [mcp_servers.coderecall]
-command = "node"
-args = ['<path>/code-recall/coderecall.js', "mcp"]
+command = "coderecall"
+args = ["mcp"]
 ```
+<sub>No global install? Use `"command": "node", "args": ["<abs path>/code-recall/coderecall.js", "mcp"]`.</sub>
 > **One global registration, many projects — read this.** The server resolves `.ai/memory/` from its **launch cwd, once at startup**. A single global entry is therefore only correct if your client spawns the server *per project*. Verified 2026-08-14 on Codex CLI launched as `codex -C <project>`: two concurrent sessions produced two separate server processes, each reading its own project's ledger. **Not** verified: clients that switch project folder *without restarting* — those could keep a server bound to the first project, silently. When unsure, call `read_memory` (read-only) and check the `GOAL:` it returns is the project you think you're in.
 
 Zero-dep stdio JSON-RPC exposing `read_memory` / `update_task` / `write_decision` / `write_lesson` / `resolve_lesson` / `reconfirm` / `search_memory` / `list_decisions`. Turns honor-system write-back into a tool call; files remain the storage layer, AGENTS.md still covers non-MCP tools.
+
+**Write contract (v2.11.0):** a tool call either completes or returns `isError` — it never reports a write that did not happen, and a missing file or a busy ledger no longer kills the server mid-session. Covered by the regression suite.
 
 ### ♻️ Current truth & influence governance
 
 The most dangerous thing about long-term memory isn't *forgetting* — it's *wrongly remembering*: stale/superseded decisions keep getting recalled and pollute context (influence rot). Code Recall treats decisions like **Git, not a vector store**: what matters is "which is HEAD (current)", not "which is most similar."
 
 - **Current/history split:** `search` and MCP `search_memory` **return current decisions only by default**; superseded/deprecated/archive don't appear. Add `--history` to include them (clearly labeled `[superseded]`). `decisions` gives the HEAD view.
-- **Explicit supersede:** `decision "new" --supersedes "old keyword"` retires the old decision directly — independent of title similarity.
+- **Explicit supersede:** `decision "new" --supersedes "old keyword"` is the only way an entry gets retired. The keyword must match exactly one active entry; no match, or an ambiguous one, aborts the write instead of leaving two live contradictory decisions.
 - **Weighted ranking:** recall score = `BM25 × statusWeight (accepted/active 1.0 / proposed 0.5 / deprecated 0.2 / resolved 0.1 / superseded·obsolete 0.05) × confidence × recency`. On an equal match, current/high-confidence/recent decisions rank first.
 - **Surfacing (resident index, anti-fragmentation):** every session / after compaction, the digest lists the **current decision titles and active lesson titles** newest-first, and each header **always carries the total count** + how to reach the rest (`decisions` for all titles, `search` for bodies). So the agent sees *which* decisions and pitfalls exist — it can't silently miss one and re-litigate it — while bodies stay pull-on-demand (the **map** is resident; the **territory** loads on demand). Bounded by per-section title caps + the fence budget. **Honest scope:** what's resident is the *existence map* (titles + counts + access path), **not** the bodies — and retrieval is lexical, so an entry findable only by a synonym can still be missed. Add `- aliases: <synonyms / old names>` to an entry to close that gap with zero dependencies.
-- **Anti-re-litigation:** recording a decision that clearly overlaps an accepted one but is below the auto-supersede bar offers three resolutions: `--supersedes "X"`, `--confirm-new`, or revise the title.
+- **Anti-re-litigation:** recording a decision whose title resembles an active one prints what it resembles and leaves **both live**, with three ways out: `--supersedes "X"`, `--confirm-new`, or revise the title. The tool never picks the winner for you — title similarity is lexical, so it cannot tell a restatement from a reversal.
 
 > Design philosophy: what an LLM lacks isn't *storage*, it's **attention** — the question isn't how many you can store, but "which few should this task see."
 >
@@ -394,7 +407,7 @@ The most dangerous thing about long-term memory isn't *forgetting* — it's *wro
 A decision log is only worth anything if decisions actually get recorded. Code Recall uses two **non-coercive** levers:
 
 ```sh
-node coderecall.js decision "Adopt hexagonal architecture" \
+coderecall decision "Adopt hexagonal architecture" \
   --context "billing tangled with HTTP" --decision "ports/adapters" --consequences "more boilerplate, easier to test"
 ```
 
@@ -405,17 +418,17 @@ node coderecall.js decision "Adopt hexagonal architecture" \
 ### 🪝 Optional: git pre-commit gate (code maintains derived state)
 
 ```sh
-node coderecall.js install-githook            # advisory: lint issues warn, commit proceeds
-node coderecall.js install-githook --strict   # strict: malformed entries block the commit
-node coderecall.js remove-githook
+coderecall install-githook            # advisory: lint issues warn, commit proceeds
+coderecall install-githook --strict   # strict: malformed entries block the commit
+coderecall remove-githook
 ```
 At commit time it regenerates the AGENTS.md digest from `TASK.md` + lints the ledger, and re-stages tracked AGENTS.md/CLAUDE.md. Cross-platform (node writes an sh hook), marker-merges without clobbering an existing hook, removed by `deinit`. Bypass once: `git commit --no-verify`.
 
 ### 🎓 Optional (experimental): graduate to ADR + cross-project lessons
 
 ```sh
-node coderecall.js graduate            # >90d, confidence high → docs/adr/NNNN-*.md (ADR files)
-node coderecall.js graduate --global   # also append to ~/.coderecall/GLOBAL-LESSONS.md (cross-project)
+coderecall graduate            # >90d, confidence high → docs/adr/NNNN-*.md (ADR files)
+coderecall graduate --global   # also append to ~/.coderecall/GLOBAL-LESSONS.md (cross-project)
 ```
 Non-destructive (entries stay in the ledger marked `graduated:`, exported once). Decisions become conventional numbered ADR files consumable by adr-tools/log4brains. To inject cross-project lessons into the digest (top-3): set `CODE_RECALL_GLOBAL_LESSONS=1`; relocate the global dir via `CODE_RECALL_GLOBAL_DIR`.
 
@@ -426,7 +439,7 @@ Off by default to honor token discipline. Enable by adding a UserPromptSubmit ho
 ### 🧹 Consolidation + 🤝 team collaboration
 
 ```sh
-node coderecall.js consolidate   # back up, archive done items, retire expired entries to archive/
+coderecall consolidate   # back up, archive done items, retire expired entries to archive/
 ```
 Memory is plain-text Markdown — commit `.ai/memory/` to git and your teammates and CI/CD share the same AI context.
 
@@ -434,17 +447,17 @@ Memory is plain-text Markdown — commit `.ai/memory/` to git and your teammates
 
 ## ❓ Troubleshooting
 
-**Hooks not firing** — run `node coderecall.js doctor`; confirm the hook in `~/.claude/settings.json` is an absolute path that exists (re-run the installer after moving the repo); restart the Claude Code session.
+**Hooks not firing** — run `coderecall doctor`; confirm the hook in `~/.claude/settings.json` is an absolute path that exists (re-run the installer after moving the repo); restart the Claude Code session.
 
 **Installer says JSON parse failed** — deliberate safety: a corrupt settings.json is never overwritten. Fix the JSON (find a `settings.json.coderecall.bak.*` backup) and re-run.
 
 **A project shouldn't have memory** — do nothing: in projects without `.ai/memory/`, all hooks exit 0 immediately, zero cost.
 
-**Digest stale** — a ledger unchanged for >2h is flagged STALE and the digest says "verify before trusting." Run `node coderecall.js status` and have the agent rewrite NOW/NEXT.
+**Digest says "may be stale"** — inside a git repo this means *the source moved past the ledger* (commits or uncommitted changes newer than `UPDATED:`), not merely that time passed; outside git it falls back to a 2h clock. Run `coderecall status` and have the agent rewrite NOW/NEXT.
 
-**Ledger too big** — run `node coderecall.js consolidate`; `doctor` warns past ~4KB/file.
+**Ledger too big** — run `coderecall consolidate`; `doctor` warns past ~4KB/file.
 
-**Uninstall** — global hooks: `install.ps1 -Uninstall` / `install.sh --uninstall` (removes only coderecall entries). Single project: `node coderecall.js deinit` (dry-run) → `--yes` (apply), preserving your content in shared files.
+**Uninstall** — global hooks: `install.ps1 -Uninstall` / `install.sh --uninstall` (removes only coderecall entries). Single project: `coderecall deinit` (dry-run) → `--yes` (apply), preserving your content in shared files.
 
 ---
 
