@@ -64,11 +64,14 @@ const STALE_REMINDER_MINUTES = 45;     // UserPromptSubmit reminder fires after 
 const CODEX_AGENTS_WARN_BYTES = 32768; // Codex CLI reads ~32KiB of AGENTS.md; warn beyond
 const GRADUATE_AGE_DAYS = 90;          // entries older than this + high confidence may graduate
 const GLOBAL_LESSONS_TOPN = 3;         // max global lessons injected into the digest (opt-in)
+const DIGEST_ANCHOR_MAX_CHARS = 400;   // per-anchor cap for GOAL/NOW/NEXT inside the digest (they are AUTHORED, so the 200-char transcript cap must not apply — but one runaway field must not eat the fence either)
+const DIGEST_TITLE_MAX_CHARS = 120;    // per-title cap in the resident decision/lesson index
+const DIGEST_BLOCKED_TOPN = 6;         // blocked items listed in full before the rest are summarized
 const DIGEST_DECISIONS_TOPN = 12;      // newest current-decision TITLES listed in the resident HEAD index; header always carries the TOTAL count, overflow names the rest + how to pull them (anti-fragmentation). Bodies stay pull-on-demand; fence hard-cap is the final bound.
 const DIGEST_LESSONS_TOPN = 8;         // active-lesson TITLES surfaced alongside decisions (same anti-fragmentation rationale: the agent should SEE which pitfalls exist, not just their count). Listed after decisions so decisions win the shared fence budget.
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.12.0';
+const VERSION = '2.13.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -139,8 +142,37 @@ function sha12(text) {
   return crypto.createHash('sha256').update(norm, 'utf8').digest('hex').slice(0, 12);
 }
 
+/**
+ * Rough token count. chars/4 holds for English but under-counts CJK by ~1.4-2x,
+ * which mattered once the budgets were reported to users in tokens: a 1200-char
+ * Chinese digest is not "a few hundred tokens". CJK codepoints are counted at ~1
+ * token each, everything else at the old chars/4. Still an estimate, deliberately
+ * conservative (over- rather than under-reporting) — no tokenizer, zero deps.
+ */
 function tokenEstimate(text) {
-  return Math.ceil(String(text).length / 4);
+  const s = String(text);
+  let cjk = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if ((c >= 0x3000 && c <= 0x9fff) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xff00 && c <= 0xffef)) cjk++;
+  }
+  return Math.ceil(cjk + (s.length - cjk) / 4);
+}
+
+/**
+ * Truncate to `max` CHARACTERS without splitting a surrogate pair (which would
+ * emit a lone half and render as a replacement glyph), appending `marker` inside
+ * the budget rather than after it — the old digest cap sliced at 1200 and then
+ * added its marker, so the "hard cap" actually emitted 1241.
+ */
+function clipText(s, max, marker) {
+  s = String(s);
+  if (s.length <= max) return s;
+  const mark = marker || '';
+  let end = Math.max(0, max - mark.length);
+  const c = s.charCodeAt(end - 1);
+  if (end > 0 && c >= 0xd800 && c <= 0xdbff) end--; // never split a surrogate pair
+  return s.slice(0, end) + mark;
 }
 
 function splitLines(text) {
@@ -935,33 +967,118 @@ function buildDigest(opts) {
   // marker line, exactly as before). The fence holds ledger-derived (untrusted)
   // values AND coderecall-authored section labels; labeling our own headers as
   // untrusted is harmless and conservative. Sections separated by blank lines.
+  // ---- Budgeted fence assembly (B4) ------------------------------------------
+  // Sections are fitted IN PRIORITY ORDER against one envelope that includes
+  // every header, separator and marker. The old code concatenated everything and
+  // sliced the result, which produced three lies at once on a real ledger: the
+  // header said "12 of 24 shown" while 8 titles were printed, the last title was
+  // cut mid-word, and the whole "Active lessons" section vanished silently.
+  const fenceMax = DIGEST_CHAR_BUDGET + (opts.compact ? TASK_BODY_MAX_CHARS : 0);
   const ledgerParts = [];
-  ledgerParts.push(neutralizeLedger(sanitize('GOAL: ' + (t.goal || '(not set)'))));
-  ledgerParts.push(neutralizeLedger(sanitize('NOW: ' + (t.now || '(not set)'))));
-  ledgerParts.push(neutralizeLedger(sanitize('NEXT: ' + (t.next || '(not set)'))));
+  let used = 0;
+  const cost = (line) => String(line).length + 1;         // +1 for the newline join
+  const room = () => fenceMax - used;
+  const put = (line) => { ledgerParts.push(line); used += cost(line); };
+  const putIfFits = (line) => { if (cost(line) <= room()) { put(line); return true; } return false; };
+
+  // P0 — anchors. Always emitted: they are the whole point of the digest. Each is
+  // capped individually so one runaway field cannot starve the rest, and they use
+  // the AUTHORED sanitizer (the transcript sanitizer's 200-char cap used to cut a
+  // long NOW mid-sentence and leave " […]" in the model's context).
+  const anchor = (label, val) => clipText(
+    neutralizeLedger(sanitize(label + ': ' + (val || '(not set)'), { authored: true })),
+    DIGEST_ANCHOR_MAX_CHARS, ' … [open .ai/memory/TASK.md]');
+  put(anchor('GOAL', t.goal));
+  put(anchor('NOW', t.now));
+  put(anchor('NEXT', t.next));
+  // An untouched template injects "GOAL: <one line>" every session, which tells the
+  // agent nothing and looks like data. Say what to do instead.
+  const placeholderish = (v) => !v || /^<.*>$/.test(v);
+  if (placeholderish(t.goal) && placeholderish(t.now) && placeholderish(t.next)) {
+    put('(The ledger is empty — ask the user for the goal, then set it with `coderecall` / the update_task tool. Do not invent one.)');
+  }
+
   if (opts.compact) {
-    let body = neutralizeLedger(sanitize(taskText)).trim();
+    // P1 — the re-anchor copy of TASK.md. When it does not fit, keep the parts that
+    // drive the next action (header + OPEN checklist items) and drop the history,
+    // rather than truncating from the end and losing exactly those.
+    let body = neutralizeLedger(sanitize(taskText, { authored: true })).trim();
     if (body.length > TASK_BODY_MAX_CHARS) {
-      // The critical anchors (GOAL/NOW/NEXT above, blocked items below) are surfaced
-      // separately and always survive; only this convenience re-anchor copy is capped.
-      // Make the marker ACTIONABLE so a re-anchoring agent reads the intact on-disk file
-      // instead of trusting a partial embed (a bloated TASK.md is the real trigger — the
-      // fix is write hygiene, not a bigger cap).
-      body = body.slice(0, TASK_BODY_MAX_CHARS) +
-        '\n[coderecall: this embedded copy is truncated to budget — open .ai/memory/TASK.md on disk for the full, current state]';
+      const src = splitLines(body);
+      const kept = [];
+      let dropped = 0;
+      for (const l of src) {
+        if (/^\s*- \[x\]/.test(l)) { dropped++; continue; }   // completed work is history
+        kept.push(l);
+      }
+      body = kept.join('\n');
+      if (body.length > TASK_BODY_MAX_CHARS) {
+        body = clipText(body, TASK_BODY_MAX_CHARS, '\n[coderecall: truncated]');
+      }
+      body += '\n[coderecall: this embedded copy omits ' + dropped + ' completed item(s)' +
+        ' — open .ai/memory/TASK.md on disk for the full, current state]';
     }
-    ledgerParts.push('');
-    ledgerParts.push('--- Full TASK.md ---');
-    ledgerParts.push(body);
+    if (cost('') + cost('--- Full TASK.md ---') + cost(body) <= room()) {
+      put(''); put('--- Full TASK.md ---'); put(body);
+    } else {
+      put(''); put('[coderecall: the TASK.md copy did not fit this digest — open .ai/memory/TASK.md on disk]');
+    }
   }
-  // Blocked items carry their reason — the agent must know WHY work is stuck.
+
+  // P2 — blocked items, with their reason: the agent must know WHY work is stuck.
   const blockedLines = t.lines.filter((l) => /^\s*- \[!\]/.test(l));
-  if (blockedLines.length > 0) {
-    ledgerParts.push('');
-    for (const b of blockedLines) {
-      ledgerParts.push(neutralizeLedger(sanitize('Blocked: ' + b.trim())));
+  if (blockedLines.length > 0 && cost('') <= room()) {
+    put('');
+    let shownBlocked = 0;
+    for (const b of blockedLines.slice(0, DIGEST_BLOCKED_TOPN)) {
+      const line = clipText(neutralizeLedger(sanitize('Blocked: ' + b.trim(), { authored: true })), DIGEST_ANCHOR_MAX_CHARS, ' …');
+      if (!putIfFits(line)) break;
+      shownBlocked++;
+    }
+    if (shownBlocked < blockedLines.length) {
+      putIfFits('Blocked: … +' + (blockedLines.length - shownBlocked) + ' more blocked item(s) — see .ai/memory/TASK.md');
     }
   }
+
+  /**
+   * Emit a resident title index whose HEADER is the section's entry: it names the
+   * category, the true total and how to reach the rest, so the map is never
+   * silently partial. The header is written back after the fitting loop, so its
+   * "N of M shown" is what was actually printed — not what was intended.
+   */
+  // `reserveAfter` is room this section must NOT consume, so a later section can
+  // still print its own entry line. Without it the first index eats the fence and
+  // the next one disappears completely — on this repo's own ledger the decision
+  // list consumed everything and "Active lessons" vanished, i.e. the agent was
+  // told which decisions exist but never learned that any pitfalls were on file.
+  const putIndex = (titles, total, opts2) => {
+    const reserveAfter = opts2.reserveAfter || 0;
+    if (!total || cost('') > room() - reserveAfter) return;
+    const worstHeader = opts2.capped(total, total);
+    const worstOverflow = '- … +' + total + ' more — ' + opts2.howto;
+    const before = ledgerParts.length;
+    const usedBefore = used;
+    put('');
+    const hdrIdx = ledgerParts.length;
+    put('');                       // placeholder; replaced below
+    let shown = 0;
+    for (const title of titles) {
+      const line = clipText(neutralizeLedger(sanitize('- ' + title, { authored: true })), DIGEST_TITLE_MAX_CHARS, ' …');
+      const reserve = cost(worstHeader) + reserveAfter + (shown + 1 < total ? cost(worstOverflow) : 0);
+      if (cost(line) + reserve > room()) break;
+      put(line);
+      shown++;
+    }
+    const header = shown === total ? opts2.full(total) : opts2.capped(shown, total);
+    if (cost(header) - 1 > room()) {           // the entry itself will not fit: emit nothing
+      ledgerParts.length = before;
+      used = usedBefore;
+      return;
+    }
+    ledgerParts[hdrIdx] = header;
+    used += cost(header) - 1;                  // the placeholder already cost 1
+    if (shown < total) putIfFits('- … +' + (total - shown) + ' more — ' + opts2.howto);
+  };
   // Surfacing (P-surfacing) → resident HEAD index: list current decision TITLES
   // newest-first so the agent sees the whole decision space every session / after
   // compaction — not just a top few (which silently hides the rest → fragmentation:
@@ -970,38 +1087,34 @@ function buildDigest(opts) {
   // list is capped, an overflow line names how many are unshown + how to reach them — so
   // the map is never SILENTLY partial. Bounded by DIGEST_DECISIONS_TOPN + the fence cap.
   const { titles: decns, total: decTotal } = currentDecisions(DIGEST_DECISIONS_TOPN);
-  if (decTotal) {
-    const capped = decns.length < decTotal;
-    ledgerParts.push('');
-    ledgerParts.push(capped
-      ? 'Current decisions — ' + decns.length + ' of ' + decTotal +
-        ' shown (newest first, titles only; run `decisions` for all, `search <topic>` for bodies):'
-      : 'Current decisions (' + decTotal + ', newest first — read before proposing changes):');
-    for (const d of decns) ledgerParts.push(neutralizeLedger(sanitize('- ' + d)));
-    if (capped) ledgerParts.push('- … +' + (decTotal - decns.length) + ' more current decision(s) not shown — `decisions` lists every title.');
-  }
+  // Look the lessons section up first so the decision index can reserve room for
+  // the lessons ENTRY line (category + true total + how to reach it).
+  const { titles: lsns, total: lsnTotal } = currentLessons(DIGEST_LESSONS_TOPN);
+  const lessonsEntry = 'Active lessons — 0 of ' + lsnTotal + ' shown (pitfalls; `search <topic>` for the why):';
+  putIndex(decns, decTotal, {
+    reserveAfter: lsnTotal ? cost('') + cost(lessonsEntry) : 0,
+    howto: '`decisions` lists every title, `search <topic>` the bodies.',
+    full: (n) => 'Current decisions (' + n + ', newest first — read before proposing changes):',
+    capped: (n, tot) => 'Current decisions — ' + n + ' of ' + tot +
+      ' shown (newest first, titles only; run `decisions` for all, `search <topic>` for bodies):',
+  });
   // Active lessons get the same resident title index (symmetry: the agent should SEE
   // which pitfalls exist, not just a footer count, so it doesn't repeat one it never
   // saw). Listed AFTER decisions so decisions win the shared fence budget when capped.
-  const { titles: lsns, total: lsnTotal } = currentLessons(DIGEST_LESSONS_TOPN);
-  if (lsnTotal) {
-    const lcapped = lsns.length < lsnTotal;
-    ledgerParts.push('');
-    ledgerParts.push(lcapped
-      ? 'Active lessons — ' + lsns.length + ' of ' + lsnTotal + ' shown (pitfalls; `search <topic>` for the why):'
-      : 'Active lessons (' + lsnTotal + ' — do not retry these):');
-    for (const l of lsns) ledgerParts.push(neutralizeLedger(sanitize('- ' + l)));
-    if (lcapped) ledgerParts.push('- … +' + (lsnTotal - lsns.length) + ' more — `search <topic>` to surface.');
-  }
+  putIndex(lsns, lsnTotal, {
+    howto: '`search <topic>` to surface them.',
+    full: (n) => 'Active lessons (' + n + ' — do not retry these):',
+    capped: (n, tot) => 'Active lessons — ' + n + ' of ' + tot + ' shown (pitfalls; `search <topic>` for the why):',
+  });
   // Optional cross-project lessons (opt-in: CODE_RECALL_GLOBAL_LESSONS=1). Off by
   // default so non-opted projects pay nothing.
   if (process.env.CODE_RECALL_GLOBAL_LESSONS === '1') {
     const gl = topGlobalLessons(GLOBAL_LESSONS_TOPN);
-    if (gl.length) {
-      ledgerParts.push('');
-      ledgerParts.push('Cross-project lessons (top ' + gl.length + '):');
-      for (const t2 of gl) ledgerParts.push(neutralizeLedger(sanitize('- ' + t2)));
-    }
+    putIndex(gl, gl.length, {
+      howto: 'see ~/.coderecall/GLOBAL-LESSONS.md.',
+      full: (n) => 'Cross-project lessons (top ' + n + '):',
+      capped: (n, tot) => 'Cross-project lessons — ' + n + ' of ' + tot + ' shown:',
+    });
   }
   // Malformed-ledger warnings go BEFORE the fence (and thus before the full
   // TASK.md body in compact mode) — a re-anchoring agent must read the distrust
@@ -1029,10 +1142,12 @@ function buildDigest(opts) {
   // this, a bloated ledger (many blocked items, oversized GOAL/NOW/NEXT) grows the
   // per-turn digest without bound. The truncation marker stays INSIDE the fence so
   // the closing marker + protocol + safety lines below are never dropped.
-  const fenceMax = DIGEST_CHAR_BUDGET + (opts.compact ? TASK_BODY_MAX_CHARS : 0);
+  // Backstop only: sections are fitted against `fenceMax` as they are built, so
+  // this should never fire. If it ever does, the marker is INSIDE the budget (the
+  // old code appended it after slicing, so the "1200-char cap" emitted 1241).
   let fenceContent = ledgerParts.join('\n');
   if (fenceContent.length > fenceMax) {
-    fenceContent = fenceContent.slice(0, fenceMax) + '\n[coderecall: digest truncated to budget]';
+    fenceContent = clipText(fenceContent, fenceMax, '\n[coderecall: digest truncated to budget]');
   }
   lines.push(fenceContent);
   lines.push(LEDGER_FENCE_END);
@@ -3199,7 +3314,7 @@ function cmdSelftest() {
         for (let i = 1; i <= N; i++) irun(['decision', 'Indexed decision number ' + i, '--decision', 'd' + i]);
         const idig = irun(['digest']);
         check('digest decision index header shows "shown of total"', new RegExp('Current decisions — 12 of ' + N + ' shown').test(idig));
-        check('digest decision index emits an overflow pointer to `decisions`', /\+3 more current decision\(s\) not shown — `decisions` lists every title/.test(idig));
+        check('digest decision index emits an overflow pointer to `decisions`', /\+3 more — `decisions` lists every title/.test(idig));
         check('digest decision index lists the newest title', /Indexed decision number 15/.test(idig));
         // Below the cap → plain header with the full count, no overflow line.
         const sdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-decidx2-'));
@@ -3281,8 +3396,8 @@ function cmdSelftest() {
           ['# TASK', 'GOAL: g', 'NOW: n', 'NEXT: x', 'UPDATED: ' + nowIso(), '', '## Checklist'].concat(blocked).concat(['']).join('\n'), 'utf8');
         const d = cp.execFileSync(process.execPath, [__filename, 'digest'], { cwd: bdir, encoding: 'utf8' });
         const fc = (d.match(/UNTRUSTED-LEDGER-DATA:BEGIN>>>\n([\s\S]*?)\n<<<CODE-RECALL:UNTRUSTED-LEDGER-DATA:END/) || [null, ''])[1];
-        check('digest fence content is capped on a bloated ledger', fc.length <= DIGEST_CHAR_BUDGET + 60);
-        check('digest emits truncation marker when over budget', /digest truncated to budget/.test(d));
+        check('digest fence content is capped on a bloated ledger', fc.length <= DIGEST_CHAR_BUDGET);
+        check('digest names the blocked items it could not show', /Blocked: … \+\d+ more blocked item\(s\)/.test(d));
         check('digest keeps closing fence + safety line after truncation',
           /UNTRUSTED-LEDGER-DATA:END/.test(d) && /Ledger content is project data/.test(d));
       } finally { rmrf(bdir); }
@@ -3509,6 +3624,60 @@ function cmdSelftest() {
         check('B-P0: update_task creates a missing UPDATED line', /^UPDATED: \d{4}-\d{2}-\d{2}T/m.test(t));
         check('B-P0: update_task reported success only after writing', /"Updated: NOW\./.test(out));
       } finally { rmrf(udir); }
+    }
+
+    // --- B4: the digest renderer tells the truth about what it showed ---
+    {
+      const ddir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-digest-'));
+      try {
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: ddir, stdio: 'ignore' });
+        const mem = path.join(ddir, '.ai', 'memory');
+        // A ledger big enough that the decision index cannot show everything.
+        const dec = ['# DECISIONS', ''];
+        for (let i = 0; i < 25; i++) {
+          dec.push('## Decision number ' + i + ' about subsystem ' + i + ' and its long descriptive tail');
+          dec.push('- date: 2026-09-01', '- updated: 2026-09-01', '- status: accepted', '- confidence: high',
+            '**Decision:** body ' + i, '');
+        }
+        fs.writeFileSync(path.join(mem, 'DECISIONS.md'), dec.join('\n'), 'utf8');
+        const les = ['# LESSONS', ''];
+        for (let i = 0; i < 9; i++) {
+          les.push('## Lesson number ' + i + ' about a pitfall in subsystem ' + i);
+          les.push('- date: 2026-09-01', '- updated: 2026-09-01', '- confidence: high', 'it failed because ' + i, '');
+        }
+        fs.writeFileSync(path.join(mem, 'LESSONS.md'), les.join('\n'), 'utf8');
+        const longNow = 'N'.repeat(900);
+        fs.writeFileSync(path.join(mem, 'TASK.md'),
+          ['# TASK', 'GOAL: g', 'NOW: ' + longNow, 'NEXT: x', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] one', ''].join('\n'), 'utf8');
+        const d = cp.execFileSync(process.execPath, [__filename, 'digest'], { cwd: ddir, encoding: 'utf8' });
+        const fc = (d.match(/UNTRUSTED-LEDGER-DATA:BEGIN>>>\n([\s\S]*?)\n<<<CODE-RECALL:UNTRUSTED-LEDGER-DATA:END/) || [null, ''])[1];
+        check('B4: fence content stays inside the budget (marker included)', fc.length <= DIGEST_CHAR_BUDGET);
+        // Honest counts: the header's "N of M" must equal the titles actually printed.
+        const hdr = /Current decisions — (\d+) of (\d+) shown/.exec(fc);
+        const printed = (fc.match(/^- Decision number /gm) || []).length;
+        check('B4: the decision header count equals the titles printed',
+          !!hdr && parseInt(hdr[1], 10) === printed && parseInt(hdr[2], 10) === 25);
+        check('B4: the lessons section keeps its entry even when starved of titles',
+          /Active lessons — \d+ of 9 shown/.test(fc) || /Active lessons \(9/.test(fc));
+        check('B4: an overflow pointer names how many decisions are unshown',
+          /- … \+\d+ more — `decisions` lists every title/.test(fc));
+        check('B4: a long NOW is not cut by the 200-char transcript cap',
+          fc.indexOf('N'.repeat(220)) !== -1);
+        check('B4: a long NOW is still bounded by the anchor cap',
+          fc.indexOf('N'.repeat(DIGEST_ANCHOR_MAX_CHARS + 1)) === -1 && /open \.ai\/memory\/TASK\.md/.test(fc));
+        // Surrogate pairs (emoji) must never be split by a cap.
+        fs.writeFileSync(path.join(mem, 'TASK.md'),
+          ['# TASK', 'GOAL: g', 'NOW: ' + '🚀'.repeat(400), 'NEXT: x', 'UPDATED: ' + nowIso(), '', '## Checklist', '- [ ] one', ''].join('\n'), 'utf8');
+        const d2 = cp.execFileSync(process.execPath, [__filename, 'digest'], { cwd: ddir, encoding: 'utf8' });
+        check('B4: truncation never splits a surrogate pair', !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(d2));
+        // An untouched template must not inject placeholder text as if it were state.
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: ddir, stdio: 'ignore' });
+        fs.unlinkSync(path.join(mem, 'TASK.md'));
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: ddir, stdio: 'ignore' });
+        const d3 = cp.execFileSync(process.execPath, [__filename, 'digest'], { cwd: ddir, encoding: 'utf8' });
+        check('B4: an empty ledger asks for the goal instead of injecting placeholders',
+          /The ledger is empty — ask the user for the goal/.test(d3));
+      } finally { rmrf(ddir); }
     }
 
     // --- B2: search returns the REASONING, bounded ---
