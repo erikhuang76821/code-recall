@@ -107,7 +107,7 @@ Output:
 ```json
 {"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"<digest>"},"suppressOutput":true}
 ```
-Digest (fence content hard-capped at ~1.2 KB chars / a few hundred tokens):
+Digest — sections are fitted against one envelope (`DIGEST_CHAR_BUDGET`, plus `TASK_BODY_MAX_CHARS` in compact) that INCLUDES headers, separators and markers, in priority order: anchors → compact TASK body → blocked items → decision index → lesson index → optional cross-project lessons. Each index header is written AFTER its fitting loop, so "N of M shown" equals what was printed; each section reserves room for the next section's entry line (category + true total + how to retrieve) so a later section is never silently starved; truncation is surrogate-safe and counts its own marker. Anchors use the AUTHORED sanitizer with their own `DIGEST_ANCHOR_MAX_CHARS` cap — the transcript sanitizer's 200-char cap used to cut a long `NOW` mid-sentence:
 ```
 [coderecall] Persistent task ledger exists at .ai/memory/.
 GOAL: ...

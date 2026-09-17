@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.13.0 (2026-09-17)
+
+**The digest now tells the truth about what it showed.** On this project's own ledger it printed the header "Current decisions — 12 of 24 shown", then 8 titles, the last cut mid-word, and dropped the entire "Active lessons" section without a word. Everything was concatenated and the result sliced at 1200 chars, so whichever section came last lost.
+
+- **Sections are fitted against one envelope as they are built** — headers, separators and markers included. Nothing is blind-sliced.
+- **"N of M shown" is what was printed**, because the header is written after the fitting loop rather than before it.
+- **Every section keeps its entry line.** A section that cannot fit a single title still states its category, its true total and how to retrieve the rest, so an agent is never left unaware that pitfalls exist. The decision index reserves room for the lessons entry before it starts filling.
+- **The cap is a cap.** The truncation marker is counted inside the budget; the old code sliced at 1200 and then appended it, emitting 1241.
+- **Truncation never splits a surrogate pair** — an emoji at the boundary used to become half a character.
+- **GOAL/NOW/NEXT use the authored sanitizer**, not the 200-char transcript cap that cut a long `NOW` mid-sentence and left `[…]` in the model's context. They stay bounded by their own 400-char anchor cap.
+- **Compaction keeps what drives the next action.** When the embedded TASK.md copy does not fit, completed `[x]` items are dropped first and counted, instead of truncating the tail and losing the open work.
+- **Blocked items are capped at 6 and the remainder is named**, rather than a long blocked list starving everything after it.
+- **An empty ledger asks for the goal** instead of injecting `GOAL: <one line>` as if it were state.
+- **Token estimates are CJK-aware.** `chars/4` under-counted Chinese by roughly 1.4-2x, which mattered once budgets were reported to users in tokens.
+- `selftest` 132 → 140.
+
 ## v2.12.0 (2026-09-17)
 
 **`search` returns the reasoning it always promised.** The protocol tells every agent to recall *why* a decision was made with `coderecall search` instead of reading the ledger whole. It could not: a hit's text starts `## title`, `- date:`, `- updated:`, and the renderer showed the first three lines — so the answer was a title (already printed as the label) and two dates, and the agent had to open the file the protocol told it not to open. The MCP tool showed two lines, which was worse.
