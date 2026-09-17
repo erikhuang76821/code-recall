@@ -83,3 +83,11 @@ v2.11.0 把 AGENTS-section.md 與 SKILL.md 的規則 2 改成「狀態改變時�
 Codex 0.154 (Windows) 的 hook,若 commandWindows 以「含空白的引號絕對路徑」開頭(例:"C:Program Files
 odejs
 ode.exe" "...sessionstart.js"),hook 不會執行,且 Codex 不報錯、模型也只是拿不到 context — 與「沒設定 hook」外觀完全相同。以二分法實測隔離:同一支 sessionstart.js,command 用正斜線或反斜線都可,加 additionalContextLimit/statusMessage 也可,唯獨把 commandWindows 換成引號開頭的絕對 node 路徑就失敗。注意 cmd.exe 直接執行同一字串是成功的,所以這不是單純的 cmd 去引號規則,而是 Codex 自身 spawn 路徑的行為。另一個獨立前提:專案級 <repo>/.codex/hooks.json 在「未受信任的專案」完全不載入,--dangerously-bypass-hook-trust 只繞過 hook 信任、不繞過專案信任;同樣是靜默無效。做法:產生 hook 設定時不要讓 commandWindows 以引號開頭;任何自動產生的 hook 都要有端到端探針驗證(寫檔 + 讓模型回報 codeword),不能只看設定檔長得對。
+
+## npm EOTP 反覆失敗:帳號 2FA 是 security key 就沒有六位數可輸入,必須走瀏覽器授權
+- date: 2026-09-17
+- updated: 2026-09-17
+- status: accepted
+- confidence: high
+- aliases: npm publish EOTP one-time password security key passkey TOTP 2FA 發布 失敗
+npm 帳號的 2FA 是 security key(WebAuthn/passkey),不是 TOTP 驗證器。發布時 npm 要求 OTP,但輸入任何六位數都被拒(EOTP),重試多次皆然;時鐘偏差已量測排除(與 registry 相差 0 秒)。根因在帳號設定頁確認:Two-Factor Authentication 顯示「Enabled for authorization and publishing / 1 security key」,完全沒有 TOTP 方法,所以根本不存在可用的六位數,--otp= 這條路先天不可能成功。正解是用 npm 印出的瀏覽器授權流程(Open this URL in your browser to authenticate → 用安全金鑰完成),終端機會自動接續完成發布。教訓:遇到 EOTP 不要先假設是碼過期或打錯而反覆重試,先確認該帳號實際啟用的 2FA 方法是什麼;security key 與 TOTP 的補救路徑完全不同。
