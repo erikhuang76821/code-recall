@@ -1,34 +1,74 @@
 # Code Recall Compatibility Matrix
 
-> 繁中摘要：Code Recall 對每個工具的支援分三層 — **被動注入**（工具自動載入協定/摘要）、
-> **寫回**（agent 更新帳本的機制：確定性 hooks vs 指令協議「榮譽制」）、
-> **Compaction 存活**（context 壓縮後任務能否無損續行）。
-> 只有 **Claude Code** 三層全滿（hooks 注入 + hooks 寫觸發 + PreCompact 快照與
-> compact 後全量重錨定）。其他工具：注入靠 rules/instructions 檔（每個請求都會重送，
-> 所以協定本身撐得過 compaction），寫回靠指令協議，但**沒有** PreCompact 快照、
-> 也**沒有** compact 後的重錨定注入 — 故標示 PARTIAL。
+> 繁中摘要:本表把「工具**能**做什麼」和「coderecall **已經**做了什麼」分開列。
+> 很多工具在 2026 年都補上了 hooks,但除非 coderecall 真的產出那個設定檔並經過實測,
+> 否則它對使用者就還不是能力。第三欄寫明驗證範圍與日期;沒寫的就是沒測過。
 
-Three layers, per tool:
+Each row has three independent columns — conflating them is how a compatibility
+table starts lying:
 
-- **Passive injection** — how the memory protocol + digest reaches the model without user action.
-- **Write-back** — how the ledger gets updated: deterministic *hooks* (machine-enforced) vs *instruction-protocol* (the rules file tells the agent to do it; honor-system).
-- **Compaction survival** — FULL = pre-compaction snapshot **and** post-compaction re-anchor injection; PARTIAL = the rules/instructions file is re-sent on every request (so the protocol survives), but there is no snapshot of the lost conversation tail and no automatic re-anchor.
+- **Harness capability** — what the tool itself exposes (hook events, instruction
+  files, MCP config), regardless of coderecall.
+- **coderecall adapter** — what `init` / `sync` / the installers actually produce
+  today. "none" means the capability exists but you would have to wire it by hand.
+- **Verified** — what was actually observed, and when. Anything else is untested.
 
-| Tool | Passive injection (mechanism + file) | Write-back | Compaction survival | Why |
-|---|---|---|---|---|
-| Claude Code (CLI / VS Code / JetBrains) | Hooks: SessionStart `additionalContext` digest; plus `CLAUDE.md` → `@AGENTS.md` import | **Hooks** (Stop heartbeat, PreCompact `UPDATED:` touch) + protocol | **FULL** — PreCompact snapshot of the transcript tail + `source=compact` re-anchor injects full TASK.md | Only tool with a hook API covering session start, stop, and pre-compaction. |
-| Cursor | `.cursor/rules/coderecall.mdc` (`alwaysApply: true`) + `.cursor/hooks.json` Stop heartbeat | Instruction-protocol (+ Stop hook for the heartbeat/timeline) | **PARTIAL** | Rules are re-attached to every request; the Stop hook maintains the heartbeat + sessions timeline, but there is still no pre-compaction snapshot/re-anchor. |
-| Windsurf | `.windsurf/rules/coderecall.md` (`trigger: always_on` frontmatter) | Instruction-protocol | **PARTIAL** | Always-on rule re-sent per request; no compaction hook. |
-| Codex CLI | `AGENTS.md` (native, read at session start) | Instruction-protocol | **PARTIAL** | AGENTS.md re-read per session; no pre-compaction snapshot or re-anchor. `doctor` warns if AGENTS.md exceeds the ~32KiB read window. |
-| GitHub Copilot | `.github/copilot-instructions.md` (marker-managed section) | Instruction-protocol | **PARTIAL** | Instructions file included with each request; no compaction lifecycle access. |
-| Gemini CLI | `.gemini/settings.json` `contextFileName` → `AGENTS.md` (native; `GEMINI.md` marker section also synced) | Instruction-protocol | **PARTIAL** | Context file loaded per session; no snapshot/re-anchor mechanism. |
-| Cline | `.clinerules/coderecall.md` | Instruction-protocol | **PARTIAL** | Rules dir injected on every task; no compaction hook. |
-| Roo Code | `.roo/rules/coderecall.md` | Instruction-protocol | **PARTIAL** | Rules dir injected on every task; no compaction hook. |
+Layers, as before: **passive injection** (how the protocol/digest reaches the model
+without user action), **write-back** (deterministic hooks vs instruction-protocol
+honor system vs MCP tool calls), **compaction survival** (pre-compaction snapshot
+and/or post-compaction re-anchor).
 
-Notes:
+| Tool | Harness capability | coderecall adapter (v2.11.0) | Verified |
+|---|---|---|---|
+| **Claude Code** (CLI / VS Code / JetBrains) | SessionStart (`startup\|resume\|clear\|compact`), PreCompact, Stop, UserPromptSubmit, SessionEnd + more; `hookSpecificOutput.additionalContext` injection; `CLAUDE.md` `@import`; project `.mcp.json`; plugins can ship hooks + skills + MCP | **Full**: `install.ps1`/`install.sh` register SessionStart + PreCompact + Stop globally; `init` writes `CLAUDE.md` → `@AGENTS.md`; optional MCP server; optional UserPromptSubmit staleness hook (off by default) | Hooks registered and firing on 2.1.263 (Windows); `selftest` drives `sessionstart.js` + `precompact.js` end-to-end on Linux + Windows × Node 18/20 in CI |
+| **Codex CLI** | 12 hook events incl. SessionStart (`startup\|resume\|clear\|compact`), PreCompact/PostCompact (`transcript_path`), Stop, UserPromptSubmit; `hookSpecificOutput.additionalContext` (default ~2500-token cap, spills to a file beyond that); `~/.codex/hooks.json`, `<repo>/.codex/hooks.json` (trusted projects), inline `[hooks]`, or a plugin; every non-managed hook needs a one-time `/hooks` trust review and re-trust after any change; AGENTS.md re-rendered after compaction; `.agents/skills/`; `[mcp_servers.*]` | **Partial — instruction-protocol + optional MCP.** AGENTS.md is written by `init`; the MCP server can be registered by hand. **No hooks are generated yet** (planned; see the note below for a hand-rolled config). | Codex 0.154.0: `hooks` = stable; `hooks/sessionstart.js` used unchanged as a Codex SessionStart hook injected the digest and gpt-6-astra quoted the `GOAL:` line back verbatim — **scope: `codex exec`, `source=startup`, with `--dangerously-bypass-hook-trust`**. The normal `/hooks` trust flow, `source=compact` re-anchoring, and PreCompact/Stop under Codex are NOT yet verified. AGENTS.md re-render after compaction confirmed in a local rollout (gpt-5.6-sol) |
+| **Cursor** | `.cursor/rules/*.mdc` (`alwaysApply`); `.cursor/hooks.json` v1 with `sessionStart` (can return `additional_context`), `preCompact`, `stop`; reads AGENTS.md natively; Memories removed in 2.1.x | Rules stub + a `stop` heartbeat entry in `.cursor/hooks.json`. No `sessionStart` / `preCompact` entry. | Schema of the emitted `stop` entry matches the documented v1 shape; runtime behaviour not re-tested this cycle |
+| **Codex/Claude-format hook readers** (VS Code Copilot, Devin CLI) | Documented to execute `~/.claude/settings.json` hooks | Whatever the installers already registered | **Not verified** — the stdin payload parity (`cwd`, `source`) has not been tested |
+| **Devin Desktop** (formerly Windsurf) | Devin Local reads AGENTS.md, `CLAUDE.md`, `.cursor/rules`; hooks: SessionStart, Stop, PostCompaction with `additionalContext`. Legacy Cascade agent: rules only, hooks cannot inject | AGENTS.md (native) + a `.windsurf/rules/` stub. `.windsurf/rules` is now a **legacy fallback**; the preferred path is `.devin/rules/` — not yet emitted | Docs only |
+| **GitHub Copilot** (CLI / cloud / VS Code) | AGENTS.md native on all surfaces; `.github/hooks/*.json` with `sessionStart` (`additionalContext`), `preCompact` (`transcriptPath`), `agentStop`; shares `.mcp.json` with Claude Code | AGENTS.md + a marker section in `.github/copilot-instructions.md` (redundant now that AGENTS.md is native, harmless). No hooks emitted | Docs only |
+| **Gemini CLI** | `GEMINI.md`; context files configured via the **nested** `context.fileName`; SessionStart / BeforeAgent `additionalContext`; PreCompress | `GEMINI.md` marker section + `.gemini/settings.json` `context.fileName` including AGENTS.md. **Fixed in v2.11.0** — earlier versions wrote a top-level `contextFileName`, which current Gemini ignores, so AGENTS.md was never actually loaded; `sync` now migrates the old key | Key name and migration verified locally (round-trips through `sync` and `deinit`); model-side loading not re-tested |
+| **Cline** | `.clinerules/`; hooks under `.clinerules/hooks/` (TaskStart / TaskComplete / PreCompact, `.ps1` on Windows) with `contextModification`; reads AGENTS.md | `.clinerules/coderecall.md` stub | Docs only; hook schema and reliability unverified |
+| **Roo Code** | `.roo/rules/`; AGENTS.md native; `.roo/mcp.json` | `.roo/rules/coderecall.md` stub | Docs only |
+| **Antigravity, Kiro, OpenCode, Amp, JetBrains Junie** | All read AGENTS.md (Kiro also `.kiro/steering/`, Antigravity `.agents/rules/`); Antigravity/Kiro/OpenCode/Amp expose hooks or plugins that could inject or re-anchor | AGENTS.md only (no per-tool stub) | Docs only |
 
-- PARTIAL is still useful: because the rules file (with the read-the-ledger protocol) accompanies **every** request, an agent that loses context via compaction is re-instructed to read `.ai/memory/TASK.md` on its next turn. What it loses versus Claude Code: the verbatim snapshot of the pre-compaction conversation tail, and the *immediate* forced re-anchor with the full TASK.md body.
-- Write-back via instruction-protocol is honor-system: well-behaved agents follow it; nothing machine-enforces it. **v2.0 ships the optional zero-dependency MCP server (`coderecall mcp`)** that closes this gap for any MCP client (Claude Desktop, Cursor, Windsurf, VS Code, Codex, …) by exposing `update_task` / `write_decision` / `write_lesson` as tool calls — still honor-system in that the agent chooses to call them, but now a structured tool rather than a recited instruction, and reliably available cross-tool. Files remain the storage layer.
-- MCP ledger binding is **per launch cwd**, resolved once when the server starts — so a single *global* MCP registration is only correct if the client spawns the server per project. Verified 2026-08-14 on Codex CLI (`codex -C <project>`): two concurrent sessions → two server processes, each bound to its own project's ledger. Untested, and the real risk: a client that switches project folder *without restarting* would keep the first project's binding, with no error on either reads or writes. `read_memory` is a read-only way to check which ledger a live server is on.
-- Recall (v1.3): `coderecall search` provides zero-dependency **lexical** (BM25) recall over the full ledger + archive. This is honestly weaker than the **semantic** recall of a vector store (it matches terms, not meaning), so MemPalace/mem0 still win cross-month *semantic* recall — but Code Recall now answers "where did I decide X / what did I learn about Y" without a DB, embeddings, or network.
-- The `.cursor/hooks.json` Stop entry is best-effort: Cursor's hook schema is younger than Claude Code's and may change. The entry is JSON-merged (idempotent, preserves your other hooks) and removable via `coderecall deinit`.
+## Notes
+
+- **The instruction layer is the floor, and it is wider than it used to be.** AGENTS.md
+  is read natively by most of the tools above (Claude Code needs the `@AGENTS.md`
+  import, Gemini needs `context.fileName`). It is re-sent with every request or
+  rebuilt every run, so the *protocol* survives compaction everywhere. What it cannot
+  carry is live state: the marker section deliberately omits `NOW:`/`NEXT:` so that a
+  committed file never leaks per-developer working state. That is what hooks add.
+- **Write-back via instruction-protocol is honor-system** — a well-behaved agent
+  follows it, nothing enforces it. The optional MCP server (`coderecall mcp`) turns
+  the writes into tool calls for any MCP client. As of v2.11.0 those tools keep a
+  strict write contract: a failure returns `isError` and the server stays up, and a
+  write is never reported as success unless it happened.
+- **Using coderecall's hooks with Codex today (unsupported, but it works).** Put this
+  in `~/.codex/hooks.json`, then run `/hooks` inside Codex once to trust it. Start
+  Codex from the directory that holds `.ai/memory/` — the hook reads the session cwd
+  and no-ops elsewhere. Any later edit to the command string requires re-trusting.
+  ```json
+  { "hooks": { "SessionStart": [ { "matcher": "startup|resume|clear|compact",
+      "hooks": [ { "type": "command",
+        "command": "node \"/abs/path/code-recall/hooks/sessionstart.js\"",
+        "commandWindows": "node \"C:/abs/path/code-recall/hooks/sessionstart.js\"",
+        "additionalContextLimit": 6000, "timeout": 10 } ] } ] } }
+  ```
+  `PreCompact` is deliberately omitted: `precompact.js` parses Claude's transcript
+  format, so under Codex it would write an empty snapshot rather than the
+  conversation tail. A Codex-aware snapshot is planned, not shipped.
+- **MCP ledger binding is per launch cwd**, resolved once when the server starts — so
+  a single *global* MCP registration is only correct if the client spawns the server
+  per project. Verified 2026-08-14 on Codex CLI (`codex -C <project>`): two concurrent
+  sessions → two server processes, each bound to its own project's ledger. Untested,
+  and the real risk: a client that switches project folder *without restarting* keeps
+  the first project's binding, with no error on reads or writes. `read_memory` is a
+  read-only way to check which ledger a live server is on.
+- **Every hook mechanism has a one-time trust step** that no installer can skip for
+  you: Codex `/hooks` (hash-based, re-prompts after any change), Claude Code's
+  `.mcp.json` approval prompt, Gemini's fingerprint warning, Antigravity's folder
+  trust. Treat "registered" and "trusted and firing" as different states.
+- **Recall is lexical.** `coderecall search` is zero-dependency BM25 over the ledger +
+  archive. This is honestly weaker than the semantic recall of a vector store (it
+  matches terms, not meaning) — `- aliases:` on an entry is the zero-dep mitigation.

@@ -21,6 +21,11 @@ const TEMPLATES_DIR = path.join(__dirname, 'templates');
 const CWD = process.cwd();
 const MEM_DIR = path.join(CWD, '.ai', 'memory');
 const ARCHIVE_DIR = path.join(MEM_DIR, 'archive');
+// Pre-consolidate ledger backups. Deliberately NOT under archive/: everything
+// matching archive/*.md is indexed by `search --history`, and a verbatim copy of
+// the live ledger there would double every entry in history results (and read as
+// a second, editable source of truth). A dot-dir is invisible to that scan.
+const BACKUPS_DIR = path.join(MEM_DIR, '.backups');
 const TASK_FILE = path.join(MEM_DIR, 'TASK.md');
 const DECISIONS_FILE = path.join(MEM_DIR, 'DECISIONS.md');
 const LESSONS_FILE = path.join(MEM_DIR, 'LESSONS.md');
@@ -38,6 +43,7 @@ const DIGEST_CHAR_BUDGET = 1200;       // hard ceiling on digest fence content (
 const LEDGER_TOKEN_BUDGET = 1000;      // each ledger file <= ~1k tokens
 const LEDGER_WARN_BYTES = 4096;        // doctor warns > ~4KB/file
 const SNAPSHOT_KEEP = 5;               // newest precompact/manual snapshots kept
+const BACKUP_KEEP = 5;                 // newest pre-consolidate ledger backups kept (.backups/)
 const STALE_HOURS = 2;                 // ledger considered stale after 2h
 const TITLE_OVERLAP_THRESHOLD = 0.8;   // dedupe-on-write title overlap
 // A NOW: value that reads like a completed-work LOG rather than a current task.
@@ -55,7 +61,7 @@ const DIGEST_DECISIONS_TOPN = 12;      // newest current-decision TITLES listed 
 const DIGEST_LESSONS_TOPN = 8;         // active-lesson TITLES surfaced alongside decisions (same anti-fragmentation rationale: the agent should SEE which pitfalls exist, not just their count). Listed after decisions so decisions win the shared fence budget.
 const RELITIGATE_LOW = 0.4;            // overlap band [LOW, TITLE_OVERLAP_THRESHOLD] warns of re-litigation
 
-const VERSION = '2.10.0';
+const VERSION = '2.11.0';
 const MCP_PROTOCOL_VERSION = '2024-11-05';   // MCP stdio JSON-RPC protocol revision we speak
 const HOME = os.homedir();
 // Cross-project global store. Overridable via CODE_RECALL_GLOBAL_DIR (testing, or
@@ -71,6 +77,24 @@ const ADR_DIR = path.join(CWD, 'docs', 'adr');   // graduated decisions → conv
 function fail(msg) {
   process.stderr.write('coderecall error: ' + msg + os.EOL);
   process.exit(1);
+}
+
+/**
+ * Library-path failure (B-P0 / G11 shared write-failure contract).
+ *
+ * `fail()` calls process.exit(1), which is correct for a one-shot CLI run but
+ * FATAL inside the long-lived `coderecall mcp` server: lock contention or a
+ * missing DECISIONS.md used to terminate the server outright instead of
+ * returning `isError` to the model (verified: `write_decision` with a missing
+ * file left the client with a dead pipe). Library functions therefore THROW a
+ * tagged error; the CLI boundary in main() converts it back into fail(), and
+ * the MCP tool dispatcher turns it into an isError result. No path may report
+ * success for a write that did not happen.
+ */
+function ledgerError(msg) {
+  const e = new Error(msg);
+  e.coderecall = true;
+  return e;
 }
 
 function readFileSafe(p) {
@@ -118,14 +142,14 @@ function splitLines(text) {
 
 function requireLedger() {
   if (!fs.existsSync(MEM_DIR)) {
-    fail('no ledger found at ' + path.join('.ai', 'memory') + '. Run: node coderecall.js init');
+    throw ledgerError('no ledger found at ' + path.join('.ai', 'memory') + '. Run: node coderecall.js init');
   }
 }
 
 function loadTemplate(name) {
   const p = path.join(TEMPLATES_DIR, name);
   const t = readFileSafe(p);
-  if (t === null) fail('missing template ' + p + ' (repo incomplete?)');
+  if (t === null) throw ledgerError('missing template ' + p + ' (repo incomplete?)');
   return t.replace(/\r\n/g, '\n');
 }
 
@@ -253,7 +277,7 @@ function releaseLock() {
 /** Run fn under the ledger lock; CLI paths hard-fail if the lock stays contended. */
 function withLock(fn) {
   if (!acquireLock()) {
-    fail('could not acquire ledger lock (' + lockDirPath() + '). Another coderecall process may be busy; retry, or delete the .lock directory if stale.');
+    throw ledgerError('could not acquire ledger lock (' + lockDirPath() + '). Another coderecall process may be busy; retry, or delete the .lock directory if stale.');
   }
   try { return fn(); } finally { releaseLock(); }
 }
@@ -560,6 +584,16 @@ function entryField(entry, field) {
   return null;
 }
 
+// The metadata header lines coderecall itself writes on an entry. Anything else
+// — including the author's own "- " bullet lists — is BODY and must survive
+// export/round-trip (see cmdGraduate: the old filter dropped every "- " line).
+const ENTRY_META_RE = /^- (?:date|updated|status|confidence|code|aliases|expires|supersedes|superseded-by|graduated|recheck):/;
+
+/** An entry's body: everything below the title that is not a coderecall metadata line. */
+function entryBodyLines(entry) {
+  return entry.lines.slice(1).filter((l) => !ENTRY_META_RE.test(l));
+}
+
 /**
  * Normalize a repo-relative path for comparison: backslashes → '/', drop a
  * leading './'. Case is preserved (lower-casing would hide case-only renames on
@@ -650,7 +684,7 @@ function serializeEntries(parsed) {
 function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMatch, extra) {
   return withLock(() => {
     const text = readFileSafe(filePath);
-    if (text === null) fail('missing ' + filePath);
+    if (text === null) throw ledgerError('missing ' + filePath);
     const parsed = parseEntries(text);
     // AUTHORED content (decision/--body/write_lesson all funnel through here):
     // redact secrets but do NOT apply the 200-char transcript cap — that silently
@@ -679,29 +713,48 @@ function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMa
     // a zero-dep mitigation for lexical search missing synonyms. Single line.
     const aliases = extra && extra.aliases ? String(extra.aliases).replace(/[\r\n]+/g, ' ').trim() : '';
     if (aliases) freshLines.push('- aliases: ' + aliases);
-    // P2 — explicit supersede: when supersedeMatch is given, retire the active
-    // entry whose TITLE CONTAINS it (case-insensitive), regardless of title
-    // overlap (fixes the brittle >0.8-Jaccard auto-match for reworded titles).
-    // Otherwise fall back to automatic title-overlap supersede.
+    // Supersede is EXPLICIT ONLY (B-P0). The old code fell back to "title
+    // Jaccard > 0.8 ⇒ retire the old entry", which measures word overlap, not
+    // decision identity: titleOverlap("Use Redis for shared production session
+    // cache across all services", "Do not use Redis for shared production
+    // session cache across all services") = 0.83, so recording the REVERSAL of a
+    // decision silently retired the decision it contradicts — and the same code
+    // path ran for LESSONS, where supersede has no meaning at all. A near title
+    // is now only a HINT returned to the caller; retiring an entry requires
+    // `--supersedes` / `supersedes:` naming it, and that match must be unique.
     const matchLc = (supersedeMatch || '').trim().toLowerCase();
     let supersededTitle = null;
-    for (const e of parsed.entries) {
-      const est = entryStatus(e);
-      if (isRetiredStatus(est)) continue; // never resurrect a retired entry as the supersede target
-      const hit = matchLc
-        ? e.title.toLowerCase().indexOf(matchLc) !== -1
-        : titleOverlap(e.title, title) > TITLE_OVERLAP_THRESHOLD;
-      if (hit) {
-        setEntryField(e, 'status', 'superseded');
-        setEntryField(e, 'superseded-by', title);
-        supersededTitle = e.title;
-        break; // supersede the first active match only
+    let overlapHint = null;
+    if (matchLc) {
+      const hits = parsed.entries.filter(
+        (e) => !isRetiredStatus(entryStatus(e)) && e.title.toLowerCase().indexOf(matchLc) !== -1);
+      // No-match and ambiguous-match both ABORT the whole write: silently
+      // appending a new entry while the supersede target stayed active would
+      // leave two live, contradictory entries and report success.
+      if (hits.length === 0) {
+        throw ledgerError('supersedes "' + supersedeMatch + '" matched no active entry in ' +
+          path.basename(filePath) + ' — nothing was written. Run `coderecall decisions` for the exact titles.');
+      }
+      if (hits.length > 1) {
+        throw ledgerError('supersedes "' + supersedeMatch + '" matched ' + hits.length + ' active entries in ' +
+          path.basename(filePath) + ' (' + hits.map((e) => '"' + e.title + '"').join(', ') +
+          ') — narrow it so exactly one is retired. Nothing was written.');
+      }
+      setEntryField(hits[0], 'status', 'superseded');
+      setEntryField(hits[0], 'superseded-by', title);
+      supersededTitle = hits[0].title;
+    } else {
+      let bestOv = 0;
+      for (const e of parsed.entries) {
+        if (isRetiredStatus(entryStatus(e))) continue;
+        const ov = titleOverlap(e.title, title);
+        if (ov > TITLE_OVERLAP_THRESHOLD && ov > bestOv) { overlapHint = e.title; bestOv = ov; }
       }
     }
     if (supersededTitle) freshLines.push('- supersedes: ' + supersededTitle);
     parsed.entries.push({ title, lines: freshLines.concat(clean) });
     writeFileAtomic(filePath, serializeEntries(parsed));
-    return supersededTitle ? 'superseded' : 'appended';
+    return { result: supersededTitle ? 'superseded' : 'appended', supersededTitle: supersededTitle, overlap: overlapHint };
   });
 }
 
@@ -717,14 +770,14 @@ function upsertEntry(filePath, title, bodyLines, confidence, status, supersedeMa
 function updateEntryMeta(filePath, titleSub, changes) {
   changes = changes || {};
   if (changes.confidence && !/^(?:high|med|low)$/.test(changes.confidence)) {
-    fail('invalid confidence "' + changes.confidence + '" (high|med|low)');
+    throw ledgerError('invalid confidence "' + changes.confidence + '" (high|med|low)');
   }
   if (changes.status && !/^(?:proposed|accepted|superseded|deprecated|resolved|obsolete)$/.test(changes.status)) {
-    fail('invalid status "' + changes.status + '"');
+    throw ledgerError('invalid status "' + changes.status + '"');
   }
   return withLock(() => {
     const text = readFileSafe(filePath);
-    if (text === null) fail('missing ' + filePath);
+    if (text === null) throw ledgerError('missing ' + filePath);
     const sub = (titleSub || '').trim().toLowerCase();
     if (!sub) return { matched: false };
     const parsed = parseEntries(text);
@@ -844,8 +897,9 @@ function nearMatchDecision(title) {
   let best = null;
   let bestOv = 0;
   for (const e of parseEntries(text).entries) {
-    const st = entryStatus(e);
-    if (st === 'superseded' || st === 'deprecated') continue;
+    // Use the shared retired set (was a local superseded|deprecated list, so a
+    // resolved/obsolete/expired entry could still raise a re-litigation note).
+    if (isRetiredStatus(entryStatus(e)) || entryExpired(e)) continue;
     const ov = titleOverlap(e.title, title);
     if (ov >= RELITIGATE_LOW && ov <= TITLE_OVERLAP_THRESHOLD && ov > bestOv) { best = e.title; bestOv = ov; }
   }
@@ -1154,6 +1208,82 @@ function rotateSnapshots() {
   }
 }
 
+/**
+ * Append a block to an archive file ONCE, keyed by the block's own content hash
+ * (G11: "retry must not duplicate a move").
+ *
+ * consolidate moves content out of the live ledger in two steps — write the
+ * archive, then rewrite the source. If the process dies between them the items
+ * are still in the source, so nothing is lost, but a naive retry would append
+ * the same block to the archive a second time. Stamping each block with
+ * `key:<sha12 of content>` makes the append idempotent: the retry sees its own
+ * key and skips. Returns 'appended' | 'duplicate'.
+ */
+function appendArchiveBlock(file, header, label, blockText) {
+  const key = sha12(blockText);
+  const prev = readFileSafe(file);
+  if (prev !== null && prev.indexOf('key:' + key) !== -1) return 'duplicate';
+  const base = prev === null ? header + '\n' : prev.replace(/\n+$/, '\n');
+  writeFileAtomic(file, base + '\n## ' + label + ' @ ' + nowIso() + '  (key:' + key + ')\n' + blockText + '\n');
+  return 'appended';
+}
+
+/**
+ * Snapshot the three ledger files into .backups/<utc>-<pid>/ before consolidate
+ * mutates anything, keeping the newest BACKUP_KEEP.
+ *
+ * consolidate is the only routine that REMOVES content from the live ledger, and
+ * it runs automatically from the PreCompact hook — i.e. unattended, right when
+ * the agent is losing context. A failure to write the backup ABORTS the
+ * consolidation (throws): losing the safety net is not a reason to proceed with
+ * the destructive part.
+ */
+/**
+ * The exact command that registers the Claude Code hooks on THIS machine.
+ * `doctor` and `init` used to print a bare "run install.ps1" — wrong OS half the
+ * time, and no path, so an `npm i -g` user had to find the package under
+ * `npm root -g`. __dirname is where the installer actually is, either way.
+ */
+function installerHint() {
+  return process.platform === 'win32'
+    ? 'powershell -ExecutionPolicy Bypass -File "' + path.join(__dirname, 'install.ps1') + '"'
+    : 'sh "' + path.join(__dirname, 'install.sh') + '"';
+}
+
+function writeConsolidateBackup() {
+  const stamp = nowIso().replace(/[:.]/g, '-');
+  const dir = path.join(BACKUPS_DIR, stamp + '-' + process.pid);
+  try {
+    ensureDir(dir);
+    for (const [name, p] of [['TASK.md', TASK_FILE], ['DECISIONS.md', DECISIONS_FILE], ['LESSONS.md', LESSONS_FILE]]) {
+      const text = readFileSafe(p);
+      if (text !== null) writeFileAtomic(path.join(dir, name), text);
+    }
+  } catch (e) {
+    throw ledgerError('could not write the pre-consolidate backup to ' + path.relative(CWD, dir) +
+      ' (' + (e && e.message ? e.message : String(e)) + ') — consolidation was NOT run, the ledger is unchanged.');
+  }
+  // Rotate: keep the newest BACKUP_KEEP directories (best-effort; a rotation
+  // failure must never fail the consolidation that already has its backup).
+  try {
+    const kept = fs.readdirSync(BACKUPS_DIR)
+      .map((n) => {
+        const full = path.join(BACKUPS_DIR, n);
+        let mtime = 0;
+        try { mtime = fs.statSync(full).mtimeMs; } catch (e) { mtime = 0; }
+        return { full, name: n, mtime };
+      })
+      .sort((a, b) => b.mtime - a.mtime || b.name.localeCompare(a.name));
+    for (const old of kept.slice(BACKUP_KEEP)) {
+      try {
+        for (const f of fs.readdirSync(old.full)) fs.unlinkSync(path.join(old.full, f));
+        fs.rmdirSync(old.full);
+      } catch (e) { /* best effort */ }
+    }
+  } catch (e) { /* best effort */ }
+  return dir;
+}
+
 function writeSnapshot(trigger, extraLines) {
   ensureDir(ARCHIVE_DIR);
   // pid suffix: two processes snapshotting in the same second must not collide.
@@ -1198,6 +1328,7 @@ function gitignoreBlock() {
     '.ai/memory/.heartbeat',
     '.ai/memory/.reminder',
     '.ai/memory/.lock/',
+    '.ai/memory/.backups/',
     GITIGNORE_END,
   ].join('\n');
 }
@@ -1259,11 +1390,19 @@ function cmdInit() {
   console.log('Git policy: DECISIONS.md / LESSONS.md travel with the repo; TASK.md / sessions.md');
   console.log('stay local (per-developer). Edit the .gitignore block to change this.');
   console.log('');
-  console.log('Model: run `coderecall init` inside EACH project you want tracked (memory is per-project).');
-  console.log('The tool installs ONCE per machine: `npm i -g @erikhuang/coderecall` (or `npm link` from the source folder).');
-  console.log('No global install needed — the CLI binds to your cwd, so `node <clone>/coderecall.js <cmd>` works');
-  console.log('from any project (alias it for convenience). Claude Code hooks: run install.ps1 / install.sh once.');
-  console.log('Optional: coderecall sync --all  (stubs for Cursor/Windsurf/Cline/Roo/Copilot/Gemini)');
+  // One concrete next step, with the REAL installer path. Printing "run
+  // install.ps1" without a path sent every npm user hunting through
+  // `npm root -g`; __dirname is where this file actually lives, npm-global or
+  // clone. The old ending also contradicted itself ("installs ONCE per machine:
+  // npm i -g" vs "No global install needed") — that belongs in `help`, not here.
+  console.log('Next: register the Claude Code hooks once per machine (auto-injects this ledger at every session start / after compaction):');
+  if (process.platform === 'win32') {
+    console.log('  powershell -ExecutionPolicy Bypass -File "' + path.join(__dirname, 'install.ps1') + '"');
+  } else {
+    console.log('  sh "' + path.join(__dirname, 'install.sh') + '"');
+  }
+  console.log('Then check it: coderecall doctor');
+  console.log('(Other tools read AGENTS.md directly — no hooks needed. `coderecall sync --all` adds per-tool stubs.)');
 }
 
 function cmdSync(all) {
@@ -1288,7 +1427,7 @@ function cmdSync(all) {
     }
     // Native config files (JSON merge, non-destructive): Gemini loads AGENTS.md
     // directly; Cursor runs the Stop heartbeat. Both preserve unrelated keys.
-    console.log('.gemini/settings.json contextFileName: ' + syncGeminiSettings());
+    console.log('.gemini/settings.json context.fileName: ' + syncGeminiSettings());
     console.log('.cursor/hooks.json stop heartbeat: ' + syncCursorHooks() + '  (best-effort; verify against your Cursor version)');
   }
 }
@@ -1574,7 +1713,9 @@ function cmdDoctor() {
   const settingsText = readFileSafe(settingsPath);
   let sessionStartCmd = null;
   if (settingsText === null) {
-    warn('~/.claude/settings.json not found — run install.ps1 to register hooks');
+    warn('~/.claude/settings.json not found — Claude Code hooks are not registered. ' +
+      (fs.existsSync(path.join(os.homedir(), '.claude')) ? '' : 'No ~/.claude directory either, so Claude Code may not be installed on this machine (harmless if you use another tool — AGENTS.md covers those). ') +
+      'To register them: ' + installerHint());
   } else {
     let settings = null;
     try { settings = JSON.parse(settingsText); } catch (e) {
@@ -1609,7 +1750,7 @@ function cmdDoctor() {
           }
         }
         if (registered) ok(event + ' hook registered');
-        else warn(event + ' hook not registered — run install.ps1');
+        else warn(event + ' hook not registered — run: ' + installerHint());
       }
     }
   }
@@ -1680,6 +1821,9 @@ function cmdConsolidate(autoSafe) {
 function consolidateLocked(opts) {
   opts = opts || {};
   let report = [];
+  // G11: back up the live ledger BEFORE anything is removed. Throws (aborting the
+  // whole consolidation) if the backup cannot be written.
+  const backupDir = writeConsolidateBackup();
 
   // 1. Move completed [x] checklist items to archive/
   //
@@ -1735,11 +1879,18 @@ function consolidateLocked(opts) {
       // work coalesced into a small, searchable summary file instead of
       // scattering one file per consolidation day. Nothing is deleted — the
       // items move here and stay indexable by `coderecall search`.
+      //
+      // ORDER MATTERS (G11): the archive must be on disk BEFORE the source loses
+      // the items. If the archive write throws, this propagates and TASK.md is
+      // untouched — the move simply did not happen. If the process dies after
+      // the archive write, the items are in both places and the content-keyed
+      // append makes the retry a no-op instead of a duplicate.
       const archFile = path.join(ARCHIVE_DIR, 'consolidated-' + todayDate().slice(0, 7) + '.md');
-      const prev = readFileSafe(archFile) || '# Consolidated checklist items\n';
-      writeFileAtomic(archFile, prev.replace(/\n+$/, '\n') + '\n## ' + nowIso() + '\n' + archivedLines.join('\n') + '\n');
+      const blockText = archivedLines.join('\n');
+      const how = appendArchiveBlock(archFile, '# Consolidated checklist items', 'checklist', blockText);
       writeFileAtomic(TASK_FILE, keptLines.join('\n'));
-      report.push('archived ' + archivedItems + ' done item(s) (incl. indented children) -> ' + path.relative(CWD, archFile));
+      report.push('archived ' + archivedItems + ' done item(s) (incl. indented children) -> ' +
+        path.relative(CWD, archFile) + (how === 'duplicate' ? ' (block already archived by an interrupted run; not duplicated)' : ''));
     } else {
       report.push('no completed checklist items to archive');
     }
@@ -1761,46 +1912,61 @@ function consolidateLocked(opts) {
       if (isRetiredStatus(entryStatus(e)) || entryExpired(e)) { retired.push(e); return false; }
       return true;
     });
-    // 2b. Legacy safety dedupe among the remaining active entries (covers
-    // hand-edited dupes that never went through upsertEntry): keep newest-dated.
-    const keep = [];
-    let deduped = 0;
-    for (const e of active) {
-      let merged = false;
-      for (let i = 0; i < keep.length; i++) {
-        if (titleOverlap(keep[i].title, e.title) > TITLE_OVERLAP_THRESHOLD) {
-          if ((entryDate(e) || '') >= (entryDate(keep[i]) || '')) keep[i] = e;
-          deduped++;
-          merged = true;
-          break;
+    // 2b. Near-duplicate titles are REPORTED, never merged (B-P0).
+    //
+    // This used to keep the newer of any two entries whose titles overlapped >0.8
+    // and DROP the other — not to archive/, just out of the file. Two verified
+    // consequences: (1) titleOverlap is lexical, so "Use Redis for X" and "Do not
+    // use Redis for X" score 0.83 and the reversal ate the original; (2) this runs
+    // from the PreCompact hook, unattended, on every compaction. Lexical title
+    // similarity cannot decide that two bodies say the same thing, so the tool
+    // stops deciding: it names the pairs and lets a human/agent resolve them with
+    // `--supersedes` (which archives the loser properly).
+    const keep = active;
+    const dupPairs = [];
+    for (let i = 0; i < keep.length; i++) {
+      for (let j = i + 1; j < keep.length; j++) {
+        if (titleOverlap(keep[i].title, keep[j].title) > TITLE_OVERLAP_THRESHOLD) {
+          dupPairs.push('"' + keep[i].title + '" ~ "' + keep[j].title + '"');
         }
       }
-      if (!merged) keep.push(e);
     }
-    // 2c. Flag entries older than GRADUATE_AGE_DAYS as confidence: low.
+    // 2c. Age flag. Was: overwrite `confidence` with `low` for anything older than
+    // GRADUATE_AGE_DAYS — which conflated "nobody re-checked this lately" with
+    // "we are less sure it is true", silently downgraded entries their author
+    // marked high, and (because `graduate` requires high) made graduation depend
+    // on whether a background consolidate happened to run first. Now it records a
+    // separate, additive `- recheck:` marker and leaves confidence alone.
     let flagged = 0;
     for (const e of keep) {
       const d = entryFreshness(e); // age from last-confirmed, not first-written
-      if (d && Date.parse(d) < cutoff) {
-        const before = e.lines.join('\n');
-        setEntryField(e, 'confidence', 'low');
-        if (e.lines.join('\n') !== before) flagged++;
+      if (d && Date.parse(d) < cutoff && entryField(e, 'recheck') === null) {
+        setEntryField(e, 'recheck', todayDate());
+        flagged++;
+      } else if (d && Date.parse(d) >= cutoff && entryField(e, 'recheck') !== null) {
+        // Re-confirmed since it was flagged — drop the marker.
+        e.lines = e.lines.filter((l) => !/^- recheck:/.test(l));
       }
     }
     if (retired.length) {
+      // ORDER MATTERS (G11): retired entries reach archive/ BEFORE they leave the
+      // live file. A throw here leaves the source intact (nothing retired); an
+      // interrupted run retries without duplicating (content-keyed append).
       const retFile = path.join(ARCHIVE_DIR, 'retired-' + todayDate().slice(0, 7) + '.md');
-      const prev = readFileSafe(retFile) || '# Retired entries (superseded / expired)\n';
       const block = retired.map((e) => e.lines.join('\n').replace(/\n+$/, '')).join('\n\n');
-      writeFileAtomic(retFile, prev.replace(/\n+$/, '\n') + '\n## ' + label + ' @ ' + nowIso() + '\n' + block + '\n');
+      appendArchiveBlock(retFile, '# Retired entries (superseded / expired)', label, block);
     }
     parsed.entries = keep;
     writeFileAtomic(p, serializeEntries(parsed));
-    report.push(label + ': ' + retired.length + ' retired (superseded/deprecated/expired), ' + deduped + ' duplicate(s) merged, ' + flagged + ' flagged confidence: low');
+    report.push(label + ': ' + retired.length + ' retired (superseded/deprecated/expired) -> archive, ' +
+      flagged + ' flagged for re-check' +
+      (dupPairs.length ? ', ' + dupPairs.length + ' near-duplicate title pair(s) NOT merged — resolve with `decision "<new>" --supersedes "<old>"`: ' + dupPairs.join('; ') : ''));
   }
 
   // 3. Refresh AGENTS.md digest after consolidation
   upsertSection(AGENTS_FILE);
   report.push('AGENTS.md marker section refreshed');
+  report.push('pre-consolidate backup: ' + path.relative(CWD, backupDir) + ' (newest ' + BACKUP_KEEP + ' kept)');
 
   if (!opts.quiet) {
     console.log('coderecall consolidate:');
@@ -2055,17 +2221,29 @@ function mergeJsonFile(dest, mutator) {
   return existing === null ? 'created' : (changed ? 'updated' : 'unchanged');
 }
 
-/** Point Gemini CLI at AGENTS.md via .gemini/settings.json contextFileName. */
+/**
+ * Point Gemini CLI at AGENTS.md via .gemini/settings.json.
+ *
+ * The setting is NESTED: `context.fileName`. We used to write a top-level
+ * `contextFileName`, which current Gemini CLI ignores outright — so the entry
+ * existed, `sync` reported success, and AGENTS.md was never actually loaded.
+ * A pre-existing top-level key is migrated into the nested one and removed, so a
+ * project synced by an older coderecall converges on the first run.
+ */
 function syncGeminiSettings() {
   return mergeJsonFile(path.join(CWD, '.gemini', 'settings.json'), (obj) => {
-    const cur = obj.contextFileName;
+    const legacy = obj.contextFileName;
+    if (!obj.context || typeof obj.context !== 'object') obj.context = {};
+    const cur = obj.context.fileName !== undefined ? obj.context.fileName : legacy;
     let arr;
     if (Array.isArray(cur)) arr = cur.slice();
     else if (typeof cur === 'string' && cur) arr = [cur];
     else arr = ['GEMINI.md'];
-    if (arr.indexOf('AGENTS.md') !== -1) { obj.contextFileName = arr; return false; }
+    const hadLegacy = legacy !== undefined;
+    if (hadLegacy) delete obj.contextFileName;      // migrate off the ignored key
+    if (arr.indexOf('AGENTS.md') !== -1) { obj.context.fileName = arr; return hadLegacy; }
     arr.unshift('AGENTS.md');
-    obj.contextFileName = arr;
+    obj.context.fileName = arr;
     return true;
   });
 }
@@ -2173,11 +2351,20 @@ function cmdDeinit(apply) {
   const gemPath = path.join(CWD, '.gemini', 'settings.json');
   if (fs.existsSync(gemPath)) {
     console.log('  .gemini/settings.json: ' + mergeJsonFile(gemPath, (obj) => {
-      if (!Array.isArray(obj.contextFileName)) return false;
-      const next = obj.contextFileName.filter((x) => x !== 'AGENTS.md');
-      if (next.length === obj.contextFileName.length) return false;
-      if (next.length) obj.contextFileName = next; else delete obj.contextFileName;
-      return true;
+      // Un-merge BOTH the nested key we write now and the legacy top-level one a
+      // previously-synced project may still carry.
+      let changed = false;
+      const strip = (holder, key) => {
+        if (!holder || !Array.isArray(holder[key])) return;
+        const next = holder[key].filter((x) => x !== 'AGENTS.md');
+        if (next.length === holder[key].length) return;
+        if (next.length) holder[key] = next; else delete holder[key];
+        changed = true;
+      };
+      strip(obj.context, 'fileName');
+      strip(obj, 'contextFileName');
+      if (obj.context && typeof obj.context === 'object' && Object.keys(obj.context).length === 0) delete obj.context;
+      return changed;
     }));
   }
   // Cursor un-merge: drop our stop hook entry.
@@ -2504,24 +2691,82 @@ function cmdRemoveGitHook() {
 // TASK.md field writer (used by the MCP update_task tool)
 // ---------------------------------------------------------------------------
 /** Set an exact-prefix TASK line (GOAL/NOW/NEXT). Touches UPDATED. Under lock. */
+/**
+ * Index of the first "## " section heading outside a code fence — i.e. the end of
+ * TASK.md's header region. parseTask only recognizes GOAL/NOW/NEXT/UPDATED above
+ * this line, so every WRITER must respect the same boundary (B-P0): the old
+ * writer scanned the whole file with `startsWith('NOW: ')`, which happily
+ * rewrote a `NOW:` line inside `## Notes` and, when the header used a tolerated
+ * spelling the writer did not know (`NOW：` / `NOW【…】`), inserted a SECOND NOW
+ * line at index 1 — producing the "TASK.md has 2 NOW lines" warning the reader
+ * then emitted about the writer's own damage.
+ */
+function taskHeaderEnd(lines) {
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^ {0,3}```/.test(lines[i])) { inFence = !inFence; continue; }
+    if (!inFence && /^## /.test(lines[i])) return i;
+  }
+  return lines.length;
+}
+
+/**
+ * Set one TASK.md header field (used by the MCP `update_task` tool).
+ *
+ * Contract (B-P0): header region only; matches the SAME tolerant spellings the
+ * reader accepts (so it rewrites in place instead of duplicating); refreshes
+ * UPDATED and creates it when absent; applies the AUTHORED sanitizer (secret
+ * redaction, generous anti-bloat cap) rather than the 200-char transcript cap
+ * that used to silently truncate a long NOW into "... […]"; and reports what it
+ * actually stored. Returns { ok, stored, truncated, duplicates, reason }.
+ */
 function setTaskField(field, value) {
   return withLock(() => {
     const text = readFileSafe(TASK_FILE);
-    if (text === null) return false;
-    const prefix = field + ': ';
-    const clean = sanitize(String(value).replace(/[\r\n]+/g, ' ')).trim();
-    let found = false;
-    let lines = splitLines(text).map((l) => {
-      if (l.startsWith(prefix)) { found = true; return prefix + clean; }
-      return l;
-    });
-    if (!found) {
-      // Insert after the title line (line 0 is "# TASK") if the field is absent.
-      lines.splice(1, 0, prefix + clean);
+    if (text === null) return { ok: false, reason: 'TASK.md missing at ' + path.relative(CWD, TASK_FILE) + ' — run `coderecall init` first; nothing was written' };
+    const lines = splitLines(text);
+    const raw = String(value).replace(/[\r\n]+/g, ' ').trim();
+    // AUTHORED: an agent's deliberate NOW/NEXT/GOAL is not transcript spill.
+    const clean = sanitize(raw, { authored: true }).trim();
+    const headerEnd = taskHeaderEnd(lines);
+    let found = -1;
+    let duplicates = 0;
+    let inFence = false;
+    for (let i = 0; i < headerEnd; i++) {
+      if (/^ {0,3}```/.test(lines[i])) { inFence = !inFence; continue; }
+      if (inFence) continue;
+      if (matchTaskField(lines[i], field) !== null) {
+        if (found < 0) found = i; else duplicates++;
+      }
     }
-    lines = lines.map((l) => l.startsWith('UPDATED: ') ? 'UPDATED: ' + nowIso() : l);
+    if (found >= 0) {
+      lines[found] = field + ': ' + clean;            // canonicalize in place
+    } else {
+      // Absent: append at the END of the header region (after the last non-blank
+      // header line), never at index 1 and never below the first "## " heading.
+      let last = -1;
+      for (let i = 0; i < headerEnd; i++) if (!/^\s*$/.test(lines[i])) last = i;
+      lines.splice(last + 1, 0, field + ': ' + clean);
+    }
+    // UPDATED: rewrite any tolerated spelling in the header; create it if absent
+    // (the old writer only matched the exact "UPDATED: " prefix and never created
+    // one, so a file without it kept a frozen freshness signal forever).
+    const end2 = taskHeaderEnd(lines);
+    let updAt = -1;
+    inFence = false;
+    for (let i = 0; i < end2; i++) {
+      if (/^ {0,3}```/.test(lines[i])) { inFence = !inFence; continue; }
+      if (inFence) continue;
+      if (matchTaskField(lines[i], 'UPDATED') !== null) { updAt = i; break; }
+    }
+    if (updAt >= 0) lines[updAt] = 'UPDATED: ' + nowIso();
+    else {
+      let last = -1;
+      for (let i = 0; i < end2; i++) if (!/^\s*$/.test(lines[i])) last = i;
+      lines.splice(last + 1, 0, 'UPDATED: ' + nowIso());
+    }
     writeFileAtomic(TASK_FILE, lines.join('\n'));
-    return true;
+    return { ok: true, stored: clean, truncated: clean.length < raw.length, duplicates: duplicates };
   });
 }
 
@@ -2869,9 +3114,9 @@ function cmdSelftest() {
     // Anti-re-litigation: a new decision in the overlap band warns (no --supersedes).
     run(['decision', 'Adopt feature flags for rollout', '--decision', 'gate releases']);
     const relit = run(['decision', 'Adopt feature flags for releases', '--decision', 'gate by flag']);
-    check('re-litigation warning fires on a near-match', /resembles accepted decision/.test(relit));
+    check('re-litigation warning fires on a near-match', /resembles active decision/.test(relit));
     const confirmed = run(['decision', 'Adopt feature flags for staging', '--decision', 'gate by flag', '--confirm-new']);
-    check('--confirm-new suppresses the re-litigation warning', !/resembles accepted decision/.test(confirmed));
+    check('--confirm-new suppresses the re-litigation warning', !/resembles active decision/.test(confirmed));
     run(['decision', 'Maybe evaluate GraphQL', '--decision', 'spike only', '--status', 'proposed']);
     const dig3 = run(['digest']);
     check('digest excludes proposed decisions from surfacing', !/Maybe evaluate GraphQL/.test(dig3));
@@ -2993,6 +3238,211 @@ function cmdSelftest() {
           new RegExp('UPDATED: ' + fixedUpdated.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(t2));
       } finally { rmrf(cdir); }
     }
+
+    // =====================================================================
+    // B-P0 — ledger integrity (three-way review, 2026-09-17). Each block is a
+    // closed acceptance criterion for a defect that was reproduced first.
+    // =====================================================================
+
+    // --- B-P0 a: a REVERSAL no longer retires the decision it contradicts ---
+    // titleOverlap("Use Redis for ...", "Do not use Redis for ...") = 0.83 > 0.8,
+    // so the old auto-supersede marked the original superseded on write.
+    {
+      const d1 = 'Use Redis for shared production session cache across all services';
+      const d2 = 'Do not use Redis for shared production session cache across all services';
+      run(['decision', d1, '--decision', 'adopt redis', '--confidence', 'high']);
+      const out2 = run(['decision', d2, '--decision', 'reject redis', '--confidence', 'high']);
+      const dTxt = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+      const e1 = parseEntries(dTxt).entries.filter((e) => e.title === d1)[0];
+      const e2 = parseEntries(dTxt).entries.filter((e) => e.title === d2)[0];
+      check('B-P0: opposing decision does NOT auto-supersede the original',
+        !!e1 && !isRetiredStatus(entryField(e1, 'status') || 'active'));
+      check('B-P0: both opposing decisions are present and active',
+        !!e2 && !isRetiredStatus(entryField(e2, 'status') || 'active'));
+      check('B-P0: the near-title collision is REPORTED as both-live', /BOTH are now live|resembles active decision/.test(out2));
+      const headNow = run(['decisions']);
+      check('B-P0: HEAD view lists both opposing decisions',
+        headNow.indexOf(d1) !== -1 && headNow.indexOf(d2) !== -1);
+    }
+
+    // --- B-P0 b: --supersedes must be unambiguous, and a miss writes NOTHING ---
+    {
+      let miss = '';
+      try { run(['decision', 'Some unrelated choice', '--decision', 'x', '--supersedes', 'no such decision anywhere']); }
+      catch (e) { miss = String(e.stderr || e.stdout || e.message); }
+      const dTxt = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+      check('B-P0: --supersedes with no match fails loudly', /matched no active entry/.test(miss));
+      check('B-P0: --supersedes with no match writes nothing', dTxt.indexOf('## Some unrelated choice') === -1);
+      let amb = '';
+      try { run(['decision', 'Redis verdict', '--decision', 'y', '--supersedes', 'redis for shared production session cache']); }
+      catch (e) { amb = String(e.stderr || e.stdout || e.message); }
+      const dTxt2 = fs.readFileSync(path.join(tmp, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+      check('B-P0: ambiguous --supersedes refuses and names the candidates',
+        /matched 2 active entries/.test(amb));
+      check('B-P0: ambiguous --supersedes writes nothing', dTxt2.indexOf('## Redis verdict') === -1);
+    }
+
+    // --- B-P0 c: LESSONS are never auto-superseded (supersede is meaningless there) ---
+    {
+      const ldir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-lesson-'));
+      try {
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: ldir, stdio: 'ignore' });
+        const mcp = (reqs) => cp.execFileSync(process.execPath, [__filename, 'mcp'],
+          { cwd: ldir, encoding: 'utf8', input: reqs.map((r) => JSON.stringify(r)).join('\n') + '\n' });
+        mcp([
+          { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'write_lesson', arguments: { title: 'Do not retry the flaky upload path on Windows', body: 'fails because the handle is still open' } } },
+          { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'write_lesson', arguments: { title: 'Do not retry the flaky upload path on Linux', body: 'different root cause: inotify backlog' } } },
+        ]);
+        const lTxt = fs.readFileSync(path.join(ldir, '.ai', 'memory', 'LESSONS.md'), 'utf8');
+        const act = parseEntries(lTxt).entries.filter((e) => !isRetiredStatus(entryField(e, 'status') || 'active'));
+        check('B-P0: two near-titled lessons both stay active', act.length === 2);
+        check('B-P0: neither lesson was marked superseded', !/- status: superseded/.test(lTxt));
+      } finally { rmrf(ldir); }
+    }
+
+    // --- B-P0 d: consolidate keeps near-duplicates, backs up, and does not
+    //             overwrite confidence by age; an old high-confidence entry
+    //             still graduates afterwards ---
+    {
+      const kdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-consol-'));
+      try {
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: kdir, stdio: 'ignore' });
+        const old = new Date(Date.now() - 200 * 24 * 3600000).toISOString().slice(0, 10);
+        fs.writeFileSync(path.join(kdir, '.ai', 'memory', 'DECISIONS.md'), [
+          '# DECISIONS', '',
+          '## Use Redis for shared production session cache across all services',
+          '- date: ' + old, '- updated: ' + old, '- status: accepted', '- confidence: high',
+          '**Decision:** adopt it', '- a body bullet that must survive export', '',
+          '## Do not use Redis for shared production session cache across all services',
+          '- date: ' + old, '- updated: ' + old, '- status: accepted', '- confidence: high',
+          '**Decision:** adopt it in staging too', '',
+        ].join('\n'), 'utf8');
+        const cons = cp.execFileSync(process.execPath, [__filename, 'consolidate'], { cwd: kdir, encoding: 'utf8' });
+        const dTxt = fs.readFileSync(path.join(kdir, '.ai', 'memory', 'DECISIONS.md'), 'utf8');
+        const ents = parseEntries(dTxt).entries;
+        check('B-P0: consolidate keeps BOTH near-duplicate entries', ents.length === 2);
+        check('B-P0: consolidate reports the near-duplicate pair instead of merging',
+          /near-duplicate title pair\(s\) NOT merged/.test(cons));
+        check('B-P0: consolidate does NOT downgrade confidence by age', !/- confidence: low/.test(dTxt));
+        check('B-P0: consolidate records a separate re-check marker', /- recheck: \d{4}-\d{2}-\d{2}/.test(dTxt));
+        let backups = [];
+        try { backups = fs.readdirSync(path.join(kdir, '.ai', 'memory', '.backups')); } catch (e) { backups = []; }
+        check('B-P0: consolidate wrote a pre-consolidate backup', backups.length === 1 &&
+          fs.existsSync(path.join(kdir, '.ai', 'memory', '.backups', backups[0], 'DECISIONS.md')));
+        // ...and the old high-confidence entry is still eligible to graduate.
+        const grad = cp.execFileSync(process.execPath, [__filename, 'graduate'], { cwd: kdir, encoding: 'utf8' });
+        check('B-P0: an old high-confidence entry still graduates after consolidate',
+          /graduated 2 ->/.test(grad));
+        const adrName = fs.readdirSync(path.join(kdir, 'docs', 'adr')).filter((n) => /^\d{4}-/.test(n))[0];
+        const adr = fs.readFileSync(path.join(kdir, 'docs', 'adr', adrName), 'utf8');
+        check('B-P0: graduate preserves the author body bullets',
+          /- a body bullet that must survive export/.test(adr));
+        check('B-P0: graduate stamps provenance on the export', /- Source: \.ai\/memory\/DECISIONS\.md/.test(adr));
+      } finally { rmrf(kdir); }
+    }
+
+    // --- B-P0 e: an interrupted move retries without duplicating (G11) ---
+    // Restore the source from the pre-consolidate backup = exactly the state a
+    // crash between "archive written" and "source rewritten" leaves behind.
+    {
+      const rdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-retry-'));
+      try {
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: rdir, stdio: 'ignore' });
+        const mem = path.join(rdir, '.ai', 'memory');
+        fs.writeFileSync(path.join(mem, 'DECISIONS.md'), [
+          '# DECISIONS', '',
+          '## Retired choice pending archive',
+          '- date: 2026-01-01', '- status: superseded', '- confidence: med',
+          '**Decision:** superseded long ago', '',
+        ].join('\n'), 'utf8');
+        cp.execFileSync(process.execPath, [__filename, 'consolidate'], { cwd: rdir, stdio: 'ignore' });
+        const bdirs = fs.readdirSync(path.join(mem, '.backups'));
+        const backupSrc = path.join(mem, '.backups', bdirs[0], 'DECISIONS.md');
+        fs.writeFileSync(path.join(mem, 'DECISIONS.md'), fs.readFileSync(backupSrc, 'utf8'), 'utf8');
+        cp.execFileSync(process.execPath, [__filename, 'consolidate'], { cwd: rdir, stdio: 'ignore' });
+        const retName = fs.readdirSync(path.join(mem, 'archive')).filter((n) => /^retired-/.test(n))[0];
+        const ret = fs.readFileSync(path.join(mem, 'archive', retName), 'utf8');
+        const occurrences = ret.split('## Retired choice pending archive').length - 1;
+        check('B-P0/G11: an interrupted archive move does not duplicate on retry', occurrences === 1);
+        check('B-P0/G11: the retried entry did leave the live file',
+          !/## Retired choice pending archive/.test(fs.readFileSync(path.join(mem, 'DECISIONS.md'), 'utf8')));
+      } finally { rmrf(rdir); }
+    }
+
+    // --- B-P0 f: MCP write contract — no false success, no server death ---
+    {
+      const mdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-mcp-'));
+      try {
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: mdir, stdio: 'ignore' });
+        const mem = path.join(mdir, '.ai', 'memory');
+        const mcp = (reqs) => cp.execFileSync(process.execPath, [__filename, 'mcp'],
+          { cwd: mdir, encoding: 'utf8', input: reqs.map((r) => JSON.stringify(r)).join('\n') + '\n' })
+          .trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+        // (1) TASK.md missing → isError, and the server keeps serving.
+        fs.unlinkSync(path.join(mem, 'TASK.md'));
+        let out = mcp([
+          { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'update_task', arguments: { now: 'probe' } } },
+          { jsonrpc: '2.0', id: 2, method: 'ping' },
+        ]);
+        const r1 = out.filter((m) => m.id === 1)[0];
+        check('B-P0: update_task on a missing TASK.md returns isError',
+          !!r1 && r1.result && r1.result.isError === true);
+        check('B-P0: update_task no longer claims "Updated" when nothing was written',
+          !!r1 && !/^Updated:/.test(r1.result.content[0].text));
+        check('B-P0: the MCP server survives a failed update_task', out.filter((m) => m.id === 2).length === 1);
+        // (2) DECISIONS.md missing → isError, server alive (used to process.exit(1)).
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: mdir, stdio: 'ignore' });
+        fs.unlinkSync(path.join(mem, 'DECISIONS.md'));
+        out = mcp([
+          { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'write_decision', arguments: { title: 't', decision: 'd' } } },
+          { jsonrpc: '2.0', id: 2, method: 'ping' },
+        ]);
+        check('B-P0: write_decision on a missing file returns isError',
+          out.filter((m) => m.id === 1 && m.result && m.result.isError === true).length === 1);
+        check('B-P0: the MCP server survives a missing DECISIONS.md (no process.exit)',
+          out.filter((m) => m.id === 2).length === 1);
+        // (3) Lock contention → isError, server alive.
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: mdir, stdio: 'ignore' });
+        fs.mkdirSync(path.join(mem, '.lock'));
+        fs.writeFileSync(path.join(mem, '.lock', 'owner'), 'someone-else', 'utf8');
+        out = mcp([
+          { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'write_lesson', arguments: { title: 'l', body: 'b' } } },
+          { jsonrpc: '2.0', id: 2, method: 'ping' },
+        ]);
+        check('B-P0: a contended lock returns isError instead of killing the server',
+          out.filter((m) => m.id === 1 && m.result && m.result.isError === true).length === 1 &&
+          out.filter((m) => m.id === 2).length === 1);
+        try { fs.unlinkSync(path.join(mem, '.lock', 'owner')); fs.rmdirSync(path.join(mem, '.lock')); } catch (e) { /* ignore */ }
+      } finally { rmrf(mdir); }
+    }
+
+    // --- B-P0 g: update_task writes only the header, keeps long values intact ---
+    {
+      const udir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-task-'));
+      try {
+        cp.execFileSync(process.execPath, [__filename, 'init'], { cwd: udir, stdio: 'ignore' });
+        const tf = path.join(udir, '.ai', 'memory', 'TASK.md');
+        // Full-width colon in the header (a spelling the READER tolerates) + a
+        // body line that merely starts with "NOW:" + no UPDATED line at all.
+        fs.writeFileSync(tf, ['# TASK', 'GOAL: g', 'NOW：old value', 'NEXT: n', '', '## Notes',
+          'NOW: this body line must not be touched', ''].join('\n'), 'utf8');
+        const longNow = 'x'.repeat(320);
+        const out = cp.execFileSync(process.execPath, [__filename, 'mcp'], {
+          cwd: udir, encoding: 'utf8',
+          input: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'update_task', arguments: { now: longNow } } }) + '\n',
+        });
+        const t = fs.readFileSync(tf, 'utf8');
+        const parsed = parseTask(t);
+        check('B-P0: update_task rewrites the tolerated header spelling in place',
+          (t.match(/^NOW[:：]/gm) || []).length === 2 && parsed.nowLines === 1);
+        check('B-P0: update_task leaves a body line alone',
+          /^NOW: this body line must not be touched$/m.test(t));
+        check('B-P0: update_task stores a long value without the 200-char marker',
+          parsed.now === longNow && t.indexOf(' […]') === -1);
+        check('B-P0: update_task creates a missing UPDATED line', /^UPDATED: \d{4}-\d{2}-\d{2}T/m.test(t));
+        check('B-P0: update_task reported success only after writing', /"Updated: NOW\./.test(out));
+      } finally { rmrf(udir); }
+    }
   } catch (e) {
     check('selftest ran without throwing', false);
     console.log('  selftest error: ' + (e && e.message ? e.message : String(e)));
@@ -3034,12 +3484,18 @@ function cmdDecision(args) {
   const status = /^(?:proposed|accepted|deprecated)$/.test(opts.status || '') ? opts.status : 'accepted';
   const confirmNew = !!(opts['confirm-new'] || opts.distinct);
   const near = (opts.supersedes || confirmNew) ? null : nearMatchDecision(title);
-  const res = upsertEntry(DECISIONS_FILE, title, splitLines(body), opts.confidence, status, opts.supersedes, { code: opts.code, aliases: opts.aliases });
+  const r = upsertEntry(DECISIONS_FILE, title, splitLines(body), opts.confidence, status, opts.supersedes, { code: opts.code, aliases: opts.aliases });
+  const res = r.result;
   console.log('DECISIONS.md: ' + res + ' — "' + title + '" [' + status + ']' +
-    (res === 'superseded' && opts.supersedes ? ' (superseded a prior decision matching "' + opts.supersedes + '")' : ''));
-  if (near && res !== 'superseded') {
-    console.log('  !! resembles accepted decision "' + near + '". Choose one:');
-    console.log('       --supersedes "' + near + '"   (this replaces it)');
+    (res === 'superseded' ? ' (superseded "' + r.supersededTitle + '")' : ''));
+  // A near-identical title is now a PROMPT, never an automatic retirement
+  // (B-P0): both entries stay active until a human/agent says which supersedes
+  // which. `overlap` is the >0.8 band the old code used to retire silently;
+  // `near` is the weaker 0.4–0.8 re-litigation band.
+  const flagged = (!confirmNew && r.overlap) || (near && res !== 'superseded' ? near : null);
+  if (res !== 'superseded' && flagged) {
+    console.log('  !! resembles active decision "' + flagged + '" — BOTH are now live. Choose one:');
+    console.log('       --supersedes "' + flagged + '"   (this replaces it)');
     console.log('       --confirm-new                 (it is a distinct decision)');
     console.log('       or revise the title           (avoid re-litigating a settled question)');
   }
@@ -3145,14 +3601,31 @@ function cmdGraduate(toGlobal) {
         let num = nextAdrNumber();
         const files = [];
         for (const e of grad) {
-          const id = String(num).padStart(4, '0');
           const date = entryField(e, 'date') || todayDate();
-          const body = e.lines.slice(1).filter((l) => !/^- /.test(l)).join('\n').replace(/^\n+|\n+$/g, '');
-          const content = '# ' + id + '. ' + e.title + '\n\n- Date: ' + date + '\n- Status: ' + entryStatus(e) + '\n- Confidence: ' + (entryField(e, 'confidence') || 'med') + '\n\n' + (body ? body + '\n' : '');
-          const fname = id + '-' + adrSlug(e.title) + '.md';
+          // Strip ONLY the known metadata header lines. This used to drop every
+          // line starting with "- ", which silently deleted the author's own
+          // bullet lists out of the exported ADR — the body was mangled exactly
+          // where a decision is most likely to enumerate options or trade-offs.
+          const body = entryBodyLines(e).join('\n').replace(/^\n+|\n+$/g, '');
+          const slug = adrSlug(e.title);
+          // Idempotent export (G11): if this decision already has an ADR file,
+          // overwrite it instead of minting a second number for the same entry —
+          // otherwise a run interrupted between the file writes and the ledger's
+          // `graduated:` stamp would export duplicates on retry.
+          let fname = null;
+          try {
+            fname = fs.readdirSync(ADR_DIR).filter((n) => n === slug + '.md' || new RegExp('^\\d{4}-' + slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.md$').test(n))[0] || null;
+          } catch (e2) { fname = null; }
+          if (!fname) { fname = String(num).padStart(4, '0') + '-' + slug + '.md'; num++; }
+          const id = (/^(\d{4})-/.exec(fname) || [null, '????'])[1];
+          const content = '# ' + id + '. ' + e.title + '\n\n- Date: ' + date +
+            '\n- Status: ' + entryStatus(e) + '\n- Confidence: ' + (entryField(e, 'confidence') || 'med') +
+            // Provenance: an exported ADR is a one-way SNAPSHOT of the ledger
+            // entry, not a second editable copy of it. Say so in the file.
+            '\n- Source: .ai/memory/DECISIONS.md — "' + e.title + '" (exported by coderecall ' + VERSION + ' on ' + todayDate() + '; edit the ledger entry, not this snapshot)' +
+            '\n\n' + (body ? body + '\n' : '');
           writeFileAtomic(path.join(ADR_DIR, fname), content);
           files.push('docs/adr/' + fname);
-          num++;
         }
         for (const e of grad) setEntryField(e, 'graduated', todayDate());
         writeFileAtomic(DECISIONS_FILE, serializeEntries(parsed));
@@ -3258,26 +3731,48 @@ function mcpCallTool(name, args) {
       return d === null ? 'TASK.md missing.' : d;
     }
     case 'update_task': {
+      // B-P0: the write result is CHECKED. This used to push the field name onto
+      // `done` regardless of setTaskField's return, so a call against a project
+      // with no TASK.md answered "Updated: NOW." while writing nothing — the
+      // worst possible failure for a memory tool (the model believes state is
+      // saved). A failure now surfaces as isError; a partial batch says which
+      // fields landed.
+      const wanted = ['goal', 'now', 'next'].filter((f) => typeof args[f] === 'string' && args[f].length);
+      if (!wanted.length) return 'No fields given. Provide goal/now/next.';
       const done = [];
-      for (const f of ['goal', 'now', 'next']) {
-        if (typeof args[f] === 'string' && args[f].length) { setTaskField(f.toUpperCase(), args[f]); done.push(f.toUpperCase()); }
+      const notes = [];
+      for (const f of wanted) {
+        const r = setTaskField(f.toUpperCase(), args[f]);
+        if (!r || !r.ok) {
+          const why = (r && r.reason) || 'write failed';
+          if (!done.length) throw new Error(why);
+          throw new Error(why + ' (already written: ' + done.join(', ') + ')');
+        }
+        done.push(f.toUpperCase());
+        if (r.truncated) notes.push(f.toUpperCase() + ' was shortened to the ' + MAX_AUTHORED_LINE + '-char line cap');
+        if (r.duplicates) notes.push(f.toUpperCase() + ' had ' + r.duplicates + ' extra header line(s); the first was updated — collapse them to one');
       }
-      if (!done.length) return 'No fields given. Provide goal/now/next.';
-      return 'Updated: ' + done.join(', ') + '.';
+      return 'Updated: ' + done.join(', ') + '.' + (notes.length ? ' Note: ' + notes.join('; ') + '.' : '');
     }
     case 'write_decision': {
       if (!args.title) throw new Error('title is required');
       const body = composeAdrBody(args);
       if (!body) throw new Error('provide `body`, or at least one of context/decision/consequences');
       const near = (args.supersedes || args.confirmNew) ? null : nearMatchDecision(String(args.title));
-      const res = upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status, args.supersedes, { code: args.code, aliases: args.aliases });
-      return 'DECISIONS.md: ' + res + (near && res !== 'superseded'
-        ? ' — NOTE: resembles accepted decision "' + near + '"; pass supersedes to replace it, or confirm it is distinct (possible re-litigation).'
-        : '');
+      const r = upsertEntry(DECISIONS_FILE, String(args.title), splitLines(body), args.confidence, args.status, args.supersedes, { code: args.code, aliases: args.aliases });
+      const flagged = (!args.confirmNew && r.overlap) || (near && r.result !== 'superseded' ? near : null);
+      return 'DECISIONS.md: ' + r.result +
+        (r.result === 'superseded' ? ' (superseded "' + r.supersededTitle + '")' : '') +
+        (r.result !== 'superseded' && flagged
+          ? ' — NOTE: resembles active decision "' + flagged + '" and BOTH are now live (nothing was retired automatically); pass supersedes to replace it, or confirmNew if it is distinct.'
+          : '');
     }
-    case 'write_lesson':
+    case 'write_lesson': {
       if (!args.title || !args.body) throw new Error('title and body are required');
-      return 'LESSONS.md: ' + upsertEntry(LESSONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence, undefined, undefined, { code: args.code, aliases: args.aliases });
+      const rl = upsertEntry(LESSONS_FILE, String(args.title), splitLines(String(args.body)), args.confidence, undefined, undefined, { code: args.code, aliases: args.aliases });
+      return 'LESSONS.md: ' + rl.result +
+        (rl.overlap ? ' — NOTE: title resembles active lesson "' + rl.overlap + '"; both are kept (lessons are never retired automatically). Use resolve_lesson if the old one no longer applies.' : '');
+    }
     case 'resolve_lesson': {
       if (!args.title) throw new Error('title is required');
       const st = args.status === 'obsolete' ? 'obsolete' : 'resolved';
@@ -3438,7 +3933,8 @@ function main() {
       console.log(usage);
       console.log('');
       console.log('Memory is per-project: run `init` inside each project you want tracked (creates ./.ai/memory/).');
-      console.log('Install the tool + Claude Code hooks once per machine: `npm i -g @erikhuang/coderecall` (or `npm link`), then install.ps1 / install.sh.');
+      console.log('Install once per machine: `npm i -g @erikhuang/coderecall` (the CLI binds to the directory you run it FROM, so one install serves every project).');
+      console.log('Claude Code hooks (optional, once per machine): ' + installerHint());
       return;
     default:
       fail('unknown command "' + cmd + '". ' + usage);
@@ -3447,7 +3943,16 @@ function main() {
 
 // Export helpers for hooks (hooks/*.js may require this file); run CLI when executed directly.
 if (require.main === module) {
-  main();
+  // CLI boundary for the shared write-failure contract (G11): library paths throw
+  // a tagged ledgerError instead of calling process.exit, so the long-lived MCP
+  // server can report isError. Here — and ONLY here — it becomes the familiar
+  // "coderecall error: ..." + exit 1. Untagged errors keep their stack (a real bug).
+  try {
+    main();
+  } catch (e) {
+    if (e && e.coderecall) fail(e.message);
+    throw e;
+  }
 } else {
   module.exports = {
     buildDigest, sanitize, upsertEntry, upsertSection, upsertSectionIn, sectionDrift, parseTask,

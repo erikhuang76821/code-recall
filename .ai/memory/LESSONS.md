@@ -54,3 +54,12 @@ Codex 3-round adversarial review of the TASK-parse fix: Round 1 said "add the wa
 - confidence: high
 - aliases: reddit launch venue gate karma megathread showcase cold account
 Launch attempt 2026-07-07: posted the prepared launch text to r/ClaudeAI from a fresh account (Thick-Reason9783). Post t3_1upq6xo was removed by mods within minutes. Root cause: subreddit now requires OP total karma >= 50 for Showcase posts on the feed; new accounts are redirected to the Built with Claude Project Showcase Megathread (comment there instead, links/images welcome). Do not burn more launch attempts on karma-gated feeds from cold accounts: either build karma first, pick venues without karma gates, or use the sanctioned megathread. Reddit RTE also escapes markdown typed via automation — switch composer to Markdown mode before entering text.
+
+## 詞法標題相似度被當成語意同一性,又放在無人看管的自動路徑上
+- date: 2026-09-17
+- updated: 2026-09-17
+- status: accepted
+- confidence: high
+- code: coderecall.js → consolidateLocked
+- aliases: titleOverlap Jaccard dedupe auto-supersede consolidate data loss 相似度 去重 資料遺失
+consolidate 用 titleOverlap>0.8 判定「重複」並刪掉其中一篇(不歸檔),而 PreCompact hook 每次壓縮都自動跑它。根因不是門檻調太低,而是把詞面相似度當成「這兩筆是同一個決策」的判準:titleOverlap("Use Redis for X","Do not use Redis for X")=0.83,所以「記下某決策的反面」就會把原決策吃掉。同一個 upsertEntry 路徑也套用在 LESSONS,而 lesson 根本沒有 supersede 的語意。修法:相似度只能產生「提示」,退役必須顯式且唯一命中;破壞性動作不可放在無人看管的 hook 路徑,且必須先落盤再移除來源。

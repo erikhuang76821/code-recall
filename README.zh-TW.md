@@ -166,14 +166,18 @@ coderecall init                     # 在「這個專案」建立 ./.ai/memory/
 
 ### 2. 安裝全域 Hooks（每台機器一次，僅 Claude Code 需要）
 
+`coderecall init` 會印出你這台機器的完整命令。安裝程式在**套件裡**,`npm i -g` 之後它不在你的專案目錄:
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1   # Windows
+# Windows — 用 `coderecall init` 印出的路徑,例如:
+powershell -ExecutionPolicy Bypass -File "$(npm root -g)@erikhuangcoderecallinstall.ps1"
 ```
 ```sh
-sh install.sh                                          # macOS / Linux
+# macOS / Linux
+sh "$(npm root -g)/@erikhuang/coderecall/install.sh"
 ```
 
-安裝程式只會「合併」進 `~/.claude/settings.json`：先備份、絕不覆蓋既有 hooks、可重複執行（idempotent）。解除安裝：`install.ps1 -Uninstall` / `install.sh --uninstall`。
+安裝程式只會「合併」進 `~/.claude/settings.json`：先備份、絕不覆蓋既有 hooks、可重複執行（idempotent）。解除安裝：`install.ps1 -Uninstall` / `install.sh --uninstall`。裝完用 `coderecall doctor` 檢查。
 
 ### 3. 完成
 
@@ -204,7 +208,7 @@ node /path/to/code-recall/coderecall.js <command>
 | `resolve-lesson "<title>" [--status resolved\|obsolete] [--note ".."]` | 退役一筆教訓：根因已修（`resolved`）或前提已不存在（`obsolete`）——保留且可經 `--history` 查到，只退出預設結果（mark-over-delete） |
 | `reconfirm "<title>" [--file decisions\|lessons] [--confidence ..]` | 重蓋一筆仍成立條目的 `updated:`（可順帶升 confidence）而不重寫內容，讓 recency 排序與 staleness 旗標把它當「新鮮」 |
 | `digest [--compact]` | 印出 session 注入用摘要（除錯用） |
-| `consolidate` | 歸檔完成項目（月度）、退役 superseded/過期條目、去重、老化降級 |
+| `consolidate` | 先備份帳本,再歸檔完成項目（月度）、把 superseded/過期條目退役到 `archive/`、替久未複查的條目加標記。不會合併或刪除任何條目 |
 | `snapshot` | 手動寫一份快照 |
 | `mcp` | 啟動零依賴 stdio MCP server（把狀態寫回變成工具呼叫） |
 | `precommit [--strict]` | git hook 用：刷新 digest + lint（`--strict` 阻擋） |
@@ -344,7 +348,7 @@ node coderecall.js selftest        # 或 doctor --selftest / npm test
 
 ### 🧹 時序 / 取代 / 過期 / 再確認（零依賴）
 
-DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈：寫入標題重疊的決策時，舊條目被**程式碼**標 `status: superseded` 並保留（看得到演化），不是靜默覆蓋。`consolidate` 把 superseded + 過期條目退役到 `archive/retired-YYYY-MM.md`。鏈結由程式碼維護（非 AI 手寫），不承載遍歷邏輯，故無孤兒/死循環風險。
+DECISIONS/LESSONS 支援 `expires:`（到期自動遺忘）與取代鏈。**取代一律顯式（v2.11.0）**:`--supersedes "<舊標題關鍵字>"`（MCP `supersedes`）才會把舊條目標 `status: superseded` 並保留（看得到演化）；該關鍵字必須**剛好命中一筆** active 條目,命中 0 筆或多筆會中止整筆寫入,而不是留下兩筆互相矛盾的生效決策。只是「標題相似」現在只會被**提示**、不會被退役:相似度是詞面的,`"Use Redis for X"` 與 `"Do not use Redis for X"` 相似度 0.83,舊版的自動取代規則等於「你記下一個決策的反面,它就把原決策退役掉」。`consolidate` 把 superseded + 過期條目退役到 `archive/retired-YYYY-MM.md`。鏈結由程式碼維護（非 AI 手寫），不承載遍歷邏輯，故無孤兒/死循環風險。
 
 另外兩個生命週期動作，都是 **mark-over-delete**（條目永不銷毀、只重新標記——所以辛苦得來的教訓仍能用 `--history` 找回）：
 
@@ -421,7 +425,7 @@ node coderecall.js graduate --global   # 另寫進 ~/.coderecall/GLOBAL-LESSONS.
 ### 🧹 記憶瘦身 + 🤝 團隊協作
 
 ```sh
-node coderecall.js consolidate   # 歸檔完成項目、退役過期條目、去重
+node coderecall.js consolidate   # 備份、歸檔完成項目、把過期條目退役到 archive/
 ```
 記憶都是純文字 Markdown，直接把 `.ai/memory/` 提交進 Git，團隊成員與 CI/CD 即可共用同一份 AI 上下文。
 

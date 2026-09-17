@@ -167,14 +167,18 @@ Creates `.ai/memory/` and inserts a protocol section into `AGENTS.md` (the instr
 
 ### 2. Install global hooks (once per machine, Claude Code only)
 
+`coderecall init` prints the exact command for your machine, with the full path — the installer ships **inside the package**, so after `npm i -g` it is not in your project directory:
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File install.ps1   # Windows
+# Windows — use the path `coderecall init` printed, e.g.:
+powershell -ExecutionPolicy Bypass -File "$(npm root -g)@erikhuangcoderecallinstall.ps1"
 ```
 ```sh
-sh install.sh                                          # macOS / Linux
+# macOS / Linux
+sh "$(npm root -g)/@erikhuang/coderecall/install.sh"
 ```
 
-The installer only **merges** into `~/.claude/settings.json`: backs up first, never clobbers existing hooks, idempotent. Uninstall: `install.ps1 -Uninstall` / `install.sh --uninstall`.
+The installer only **merges** into `~/.claude/settings.json`: backs up first, never clobbers existing hooks, idempotent. Uninstall: `install.ps1 -Uninstall` / `install.sh --uninstall`. Verify with `coderecall doctor`.
 
 ### 3. Done
 
@@ -205,7 +209,7 @@ node /path/to/code-recall/coderecall.js <command>
 | `resolve-lesson "<title>" [--status resolved\|obsolete] [--note ".."]` | Retire a lesson whose root cause is fixed (`resolved`) or whose premise is gone (`obsolete`) — kept & searchable via `--history`, just dropped from default results (mark-over-delete) |
 | `reconfirm "<title>" [--file decisions\|lessons] [--confidence ..]` | Re-stamp a still-true entry's `updated:` (and optionally raise confidence) without rewriting it, so recency ranking + the staleness flag treat it as fresh |
 | `digest [--compact]` | Print the session-injection digest (debugging) |
-| `consolidate` | Archive done items (monthly), retire superseded/expired entries, dedupe, age-flag |
+| `consolidate` | Back up the ledger, archive done items (monthly), retire superseded/expired entries to `archive/`, flag un-rechecked entries. Never merges or drops anything |
 | `snapshot` | Write a manual snapshot |
 | `mcp` | Run the zero-dep stdio MCP server (memory write-back as tool calls) |
 | `precommit [--strict]` | Used by the git hook: refresh digest + lint (`--strict` blocks) |
@@ -345,7 +349,7 @@ Simulates compaction in a throwaway project and **drives the real hook scripts**
 
 ### 🧹 Temporal / supersede / expire / reconfirm (zero-dep)
 
-DECISIONS/LESSONS support `expires:` (auto-forget on/after a date) and a supersede chain: writing an overlapping-title decision marks the old one `status: superseded` (kept, so evolution stays visible) by **code**, not a silent overwrite. `consolidate` retires superseded + expired entries to `archive/retired-YYYY-MM.md`. The links are code-maintained (not hand-written by the AI) and carry no traversal logic, so there are no orphans / cycles.
+DECISIONS/LESSONS support `expires:` (auto-forget on/after a date) and a supersede chain. **Superseding is explicit (v2.11.0)**: `--supersedes "<old title substring>"` (MCP `supersedes`) marks the old entry `status: superseded` and keeps it, so the evolution stays visible. That substring must match exactly one active entry — no match, or more than one, aborts the write instead of leaving two live contradictory entries. A merely *similar* title is now reported, never retired: similarity is lexical, and `"Use Redis for X"` vs `"Do not use Redis for X"` scores 0.83, so the old auto-supersede rule retired a decision whenever you recorded its reversal. `consolidate` retires superseded + expired entries to `archive/retired-YYYY-MM.md`. The links are code-maintained (not hand-written by the AI) and carry no traversal logic, so there are no orphans / cycles.
 
 Two more lifecycle moves, both **mark-over-delete** (an entry is never destroyed, only re-stamped — so a hard-won lesson stays reachable via `--history`):
 
@@ -422,7 +426,7 @@ Off by default to honor token discipline. Enable by adding a UserPromptSubmit ho
 ### 🧹 Consolidation + 🤝 team collaboration
 
 ```sh
-node coderecall.js consolidate   # archive done items, retire expired entries, dedupe
+node coderecall.js consolidate   # back up, archive done items, retire expired entries to archive/
 ```
 Memory is plain-text Markdown — commit `.ai/memory/` to git and your teammates and CI/CD share the same AI context.
 
